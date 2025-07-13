@@ -191,7 +191,11 @@ async function copyWorkspaceFiles(source: string, destination: string) {
     'dist',
     'build',
     '.DS_Store',
-    'Thumbs.db'
+    'Thumbs.db',
+    'venv',
+    'env',
+    '.venv',
+    '.env'
   ];
   
   const copyRecursive = (src: string, dest: string) => {
