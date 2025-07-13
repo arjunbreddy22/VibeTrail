@@ -2,7 +2,6 @@
 
 ![Version](https://img.shields.io/badge/version-0.0.1-blue)
 
-
 **VibeTrail is a Visual Studio Code extension that automatically tracks your coding progress by creating snapshots of your workspace. It’s like a personal time machine for your code, allowing you to look back at your work without cluttering your main Git history.**
 
 Whether you're experimenting with a new feature, refactoring a complex module, or just want a private record of your daily progress, VibeTrail has you covered.
@@ -18,20 +17,6 @@ Whether you're experimenting with a new feature, refactoring a complex module, o
   - **Smart Summaries**: Let AI generate concise, human-readable summaries of the changes between snapshots.
   - **Risk Assessment**: Get an AI-powered analysis of potential risks or issues in your code changes.
 
-## 🚀 Getting Started
-
-1.  **Install Dependencies**:
-    ```bash
-    npm install
-    ```
-2.  **Compile the Extension**:
-    ```bash
-    npm run compile
-    ```
-3.  **Run in VS Code**:
-    - Press `F5` to open a new Extension Development Host window.
-    - Open any workspace to start using VibeTrail.
-
 ## 💻 How to Use
 
 1.  **Open the Command Palette**: `Ctrl+Shift+P` (or `Cmd+Shift+P` on Mac).
@@ -45,7 +30,7 @@ Whether you're experimenting with a new feature, refactoring a complex module, o
       - **Restore**: Revert your workspace to a previous state.
       - **Generate AI Summaries**: Get AI-powered insights into your changes (requires configuration).
 
-## ⚙️ Configuration
+## ⚙️ Configuration for AI Features
 
 To enable the AI-powered features, you need to provide an OpenAI API key:
 
@@ -54,7 +39,7 @@ To enable the AI-powered features, you need to provide an OpenAI API key:
 3.  **Set the API Key**:
     - Search for **`VibeTrail`**.
     - In the **`VibeTrail: OpenAI API Key`** field, enter your API key.
-    - **Important**: For the best experience, set the API key in both your **User** and **Workspace** settings.
+    - **Important**: Due to how VS Code handles extension settings, you must set the API key in both your **User** and **Workspace** settings for the AI features to be reliably enabled.
 
 ## 📁 What Gets Tracked
 
@@ -68,15 +53,8 @@ VibeTrail is smart about what it tracks. It ignores common development files and
 
 ## 🤝 Contributing
 
-We welcome contributions! To get started:
-
-1.  Clone this repository.
-2.  Install dependencies: `npm install`.
-3.  Start the watch mode to automatically recompile on changes: `npm run watch`.
-4.  Press `F5` to launch the extension in a new VS Code window.
+Contributions are welcome! Please feel free to open an issue or submit a pull request.
 
 ## 📄 License
 
-This project is proprietary and closed-source. All rights are reserved.
-
-For licensing information, please contact us at [arjunreddy5275@gmail.com](mailto:arjunreddy5275@gmail.com).
+This project is proprietary and closed-source. All rights are reserved. For licensing information, please see the LICENSE file.
