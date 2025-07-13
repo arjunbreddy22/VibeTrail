@@ -11,6 +11,17 @@ interface CommitInfo {
   message: string;
   prompt: string;
   date: Date;
+  filesChanged: number;
+  linesAdded: number;
+  linesRemoved: number;
+  fileDetails?: FileChangeDetail[];
+}
+
+interface FileChangeDetail {
+  filename: string;
+  linesAdded: number;
+  linesRemoved: number;
+  status: 'added' | 'modified' | 'deleted';
 }
 
 let shadowRepoPath: string;
@@ -229,20 +240,65 @@ async function getCommitHistory(): Promise<CommitInfo[]> {
   try {
     const log = await git.log();
     
-    return log.all.map(commit => {
+    const commits: CommitInfo[] = [];
+    
+    for (let i = 0; i < log.all.length; i++) {
+      const commit = log.all[i];
+      const previousCommit = log.all[i + 1];
+      
       // Parse prompt from commit message if it exists
       const messageParts = commit.message.split(' | Snapshot @ ');
       const prompt = messageParts.length > 1 ? messageParts[0] : '';
       const timestamp = messageParts.length > 1 ? messageParts[1] : commit.date;
       
-      return {
+      // Analyze changes since previous commit
+      let filesChanged = 0;
+      let linesAdded = 0;
+      let linesRemoved = 0;
+      let fileDetails: FileChangeDetail[] = [];
+      
+      try {
+        if (previousCommit) {
+          // Get diff stats between this commit and previous
+          const diffSummary = await git.diffSummary([previousCommit.hash, commit.hash]);
+          
+          filesChanged = diffSummary.files.length;
+          linesAdded = diffSummary.insertions;
+          linesRemoved = diffSummary.deletions;
+          
+          // Get file details
+          fileDetails = diffSummary.files.map(file => {
+            // Handle different file types - binary files don't have insertions/deletions
+            const insertions = 'insertions' in file ? file.insertions : 0;
+            const deletions = 'deletions' in file ? file.deletions : 0;
+            
+            return {
+              filename: file.file,
+              linesAdded: insertions,
+              linesRemoved: deletions,
+              status: insertions > 0 && deletions === 0 ? 'added' :
+                     insertions === 0 && deletions > 0 ? 'deleted' : 'modified'
+            };
+          });
+        }
+      } catch (diffError) {
+        console.warn('Could not analyze diff for commit:', commit.hash);
+      }
+      
+      commits.push({
         hash: commit.hash,
         timestamp: commit.date,
         message: commit.message,
         prompt: prompt,
-        date: new Date(commit.date)
-      };
-    });
+        date: new Date(commit.date),
+        filesChanged,
+        linesAdded,
+        linesRemoved,
+        fileDetails
+      });
+    }
+    
+    return commits;
   } catch (error) {
     console.error('Error getting commit history:', error);
     return [];
@@ -403,10 +459,68 @@ function getWebviewContent(commits: CommitInfo[]): string {
             padding: 40px;
             color: var(--vscode-descriptionForeground);
         }
-        .commit-prompt {
+                        .commit-prompt {
             font-style: italic;
             color: var(--vscode-textLink-foreground);
             margin-bottom: 5px;
+        }
+        .commit-stats {
+            display: flex;
+            gap: 15px;
+            margin: 8px 0;
+            font-size: 0.85em;
+            color: var(--vscode-descriptionForeground);
+        }
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .file-changes {
+            margin-top: 10px;
+            padding: 8px;
+            background: var(--vscode-editor-inactiveSelectionBackground);
+            border-radius: 4px;
+            font-size: 0.8em;
+        }
+        .file-changes.collapsed {
+            display: none;
+        }
+        .file-change-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 2px 0;
+            border-bottom: 1px solid var(--vscode-panel-border);
+        }
+        .file-change-item:last-child {
+            border-bottom: none;
+        }
+        .file-name {
+            font-family: var(--vscode-editor-font-family);
+            color: var(--vscode-textLink-foreground);
+        }
+        .file-stats {
+            font-size: 0.75em;
+            color: var(--vscode-descriptionForeground);
+        }
+        .lines-added {
+            color: #28a745;
+        }
+        .lines-removed {
+            color: #dc3545;
+        }
+        .toggle-files {
+            background: none;
+            border: none;
+            color: var(--vscode-textLink-foreground);
+            cursor: pointer;
+            font-size: 0.8em;
+            padding: 2px 4px;
+            margin-left: 8px;
+        }
+        .toggle-files:hover {
+            text-decoration: underline;
         }
     </style>
 </head>
@@ -423,13 +537,54 @@ function getWebviewContent(commits: CommitInfo[]): string {
                 <div class="commit">
                     <div class="commit-header">
                         <div class="commit-info">
-                            ${commit.prompt ? `<div class="commit-prompt">"${commit.prompt}"</div>` : ''}
+                            <div style="display: flex; align-items: center; flex-wrap: wrap; margin-bottom: 8px;">
+                                ${commit.prompt ? `<div class="commit-prompt">"${commit.prompt}"</div>` : ''}
+                            </div>
+                            
                             <div class="commit-message">${commit.prompt ? 'Snapshot' : commit.message}</div>
+                            
+                            <div class="commit-stats">
+                                <div class="stat-item">
+                                    <span>📄</span>
+                                    <span>${commit.filesChanged} files changed</span>
+                                </div>
+                                ${commit.linesAdded > 0 ? `
+                                    <div class="stat-item lines-added">
+                                        <span>+${commit.linesAdded}</span>
+                                    </div>
+                                ` : ''}
+                                ${commit.linesRemoved > 0 ? `
+                                    <div class="stat-item lines-removed">
+                                        <span>-${commit.linesRemoved}</span>
+                                    </div>
+                                ` : ''}
+                            </div>
+                            
                             <div class="commit-details">
                                 <div>Hash: ${commit.hash.substring(0, 8)}</div>
                                 <div>Date: ${new Date(commit.timestamp).toLocaleString()}</div>
+                                ${commit.filesChanged > 0 ? `
+                                    <button id="toggle-${commit.hash}" class="toggle-files" onclick="toggleFiles('${commit.hash}')">
+                                        Show Files
+                                    </button>
+                                ` : ''}
                             </div>
+                            
+                            ${commit.filesChanged > 0 ? `
+                                <div id="files-${commit.hash}" class="file-changes collapsed">
+                                    ${commit.fileDetails?.map(file => `
+                                        <div class="file-change-item">
+                                            <div class="file-name">${file.filename}</div>
+                                            <div class="file-stats">
+                                                ${file.linesAdded > 0 ? `<span class="lines-added">+${file.linesAdded}</span>` : ''}
+                                                ${file.linesRemoved > 0 ? `<span class="lines-removed">-${file.linesRemoved}</span>` : ''}
+                                            </div>
+                                        </div>
+                                    `).join('') || ''}
+                                </div>
+                            ` : ''}
                         </div>
+                        
                         <div class="commit-actions">
                             ${index < commits.length - 1 ? `
                                 <button class="btn btn-secondary" onclick="viewDiff('${commit.hash}', '${commits[index + 1].hash}')">
@@ -462,6 +617,19 @@ function getWebviewContent(commits: CommitInfo[]): string {
                 command: 'restore',
                 hash: hash
             });
+        }
+        
+        function toggleFiles(commitHash) {
+            const filesDiv = document.getElementById('files-' + commitHash);
+            const toggleButton = document.getElementById('toggle-' + commitHash);
+            
+            if (filesDiv.classList.contains('collapsed')) {
+                filesDiv.classList.remove('collapsed');
+                toggleButton.textContent = 'Hide Files';
+            } else {
+                filesDiv.classList.add('collapsed');
+                toggleButton.textContent = 'Show Files';
+            }
         }
     </script>
 </body>
