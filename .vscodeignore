@@ -1,0 +1,24 @@
+# Source files (users only need compiled output)
+src/
+*.ts
+*.map
+
+# Development dependencies and build artifacts
+node_modules/
+.vscode/
+tsconfig.json
+
+# Development files
+.gitignore
+.vscodeignore
+
+# Test files
+test/
+*.test.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts that aren't needed
+*.vsix 
