@@ -50,6 +50,7 @@ VibeTrail is smart about what it tracks. It ignores common development files and
 - `.vscode/`
 - `out/`, `dist/`, `build/`
 - `.DS_Store`, `Thumbs.db`
+- `venv/`, `env/`, `.venv/`, `.env`
 
 ## 🤝 Contributing
 
