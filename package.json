@@ -26,7 +26,18 @@
         "title": "Show Timeline",
         "category": "VibeTrail"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "VibeTrail",
+      "properties": {
+        "vibetrail.openaiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI API key for AI-powered features (change summaries and risk analysis)",
+          "markdownDescription": "Your OpenAI API key. Get one at [OpenAI Platform](https://platform.openai.com/api-keys)"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -39,6 +50,7 @@
     "typescript": "^4.9.4"
   },
   "dependencies": {
-    "simple-git": "^3.19.1"
+    "simple-git": "^3.19.1",
+    "openai": "^4.28.0"
   }
 } 

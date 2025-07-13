@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { simpleGit, SimpleGit } from 'simple-git';
+import OpenAI from 'openai';
 
 // Interface for commit metadata
 interface CommitInfo {
@@ -15,6 +16,9 @@ interface CommitInfo {
   linesAdded: number;
   linesRemoved: number;
   fileDetails?: FileChangeDetail[];
+  aiSummary?: string;
+  aiRiskAnalysis?: string;
+  aiSummaryLoading?: boolean;
 }
 
 interface FileChangeDetail {
@@ -26,6 +30,8 @@ interface FileChangeDetail {
 
 let shadowRepoPath: string;
 let git: SimpleGit;
+let openai: OpenAI | null = null;
+let activeTimelinePanel: vscode.WebviewPanel | null = null;
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('VibeTrail extension is now active!');
@@ -33,11 +39,30 @@ export function activate(context: vscode.ExtensionContext) {
   // Initialize shadow Git repo on activation
   initializeShadowRepo();
   
+  // Initialize OpenAI
+  initializeOpenAI();
+  
+  // Listen for configuration changes
+  const configChangeListener = vscode.workspace.onDidChangeConfiguration(async event => {
+    if (event.affectsConfiguration('vibetrail.openaiApiKey')) {
+      console.log('OpenAI API key configuration changed, reinitializing...');
+      initializeOpenAI();
+      
+      // Refresh the timeline if it's open
+      if (activeTimelinePanel) {
+        const commits = await getCommitHistory();
+        const hasApiKey = !!openai;
+        activeTimelinePanel.webview.html = getWebviewContent(commits, hasApiKey);
+        console.log('Timeline refreshed with new API key status:', hasApiKey);
+      }
+    }
+  });
+  
   // Register commands
   const saveSnapshotCommand = vscode.commands.registerCommand('vibetrail.saveSnapshot', () => saveSnapshot());
   const showTimelineCommand = vscode.commands.registerCommand('vibetrail.showTimeline', showTimeline);
   
-  context.subscriptions.push(saveSnapshotCommand, showTimelineCommand);
+  context.subscriptions.push(saveSnapshotCommand, showTimelineCommand, configChangeListener);
 }
 
 /**
@@ -68,6 +93,31 @@ async function initializeShadowRepo() {
   } catch (error) {
     console.error('Error initializing shadow repository:', error);
     vscode.window.showErrorMessage('Failed to initialize VibeTrail shadow repository');
+  }
+}
+
+/**
+ * Initialize OpenAI client
+ */
+function initializeOpenAI() {
+  try {
+    const config = vscode.workspace.getConfiguration('vibetrail');
+    const apiKey = config.get<string>('openaiApiKey');
+    
+    console.log('Initializing OpenAI with API key present:', !!apiKey);
+    
+    if (apiKey && apiKey.trim()) {
+      openai = new OpenAI({
+        apiKey: apiKey.trim()
+      });
+      console.log('OpenAI client initialized successfully');
+    } else {
+      openai = null;
+      console.log('OpenAI API key not configured or empty');
+    }
+  } catch (error) {
+    console.error('Error initializing OpenAI:', error);
+    openai = null;
   }
 }
 
@@ -201,6 +251,7 @@ async function copyWorkspaceFiles(source: string, destination: string) {
 async function showTimeline() {
   try {
     const commits = await getCommitHistory();
+    const hasApiKey = !!openai;
     
     const panel = vscode.window.createWebviewPanel(
       'vibetrailTimeline',
@@ -212,17 +263,32 @@ async function showTimeline() {
       }
     );
     
-    panel.webview.html = getWebviewContent(commits);
+    // Track the active panel
+    activeTimelinePanel = panel;
+    
+    // Clean up when panel is disposed
+    panel.onDidDispose(() => {
+      activeTimelinePanel = null;
+    });
+    
+    panel.webview.html = getWebviewContent(commits, hasApiKey);
     
     // Handle messages from webview
     panel.webview.onDidReceiveMessage(
-      message => {
+      async message => {
         switch (message.command) {
           case 'viewDiff':
             viewDiff(message.currentHash, message.previousHash);
             break;
           case 'restore':
             restoreSnapshot(message.hash);
+            break;
+          case 'generateSummary':
+            console.log('Received generateSummary command:', message);
+            await handleGenerateSummary(panel, message.currentHash, message.previousHash);
+            break;
+          case 'openSettings':
+            vscode.commands.executeCommand('workbench.action.openSettings', 'vibetrail.openaiApiKey');
             break;
         }
       }
@@ -325,6 +391,142 @@ async function viewDiff(currentHash: string, previousHash: string) {
 }
 
 /**
+ * Handle generating AI summary from webview
+ */
+async function handleGenerateSummary(panel: vscode.WebviewPanel, currentHash: string, previousHash: string) {
+  console.log('handleGenerateSummary called');
+  console.log('OpenAI client status:', !!openai);
+  
+  try {
+    if (!openai) {
+      console.log('No OpenAI client, showing error dialog');
+      const result = await vscode.window.showErrorMessage(
+        'OpenAI API key not configured. Would you like to set it up now?', 
+        'Open Settings', 
+        'Get API Key'
+      );
+      
+      if (result === 'Open Settings') {
+        vscode.commands.executeCommand('workbench.action.openSettings', 'vibetrail.openaiApiKey');
+      } else if (result === 'Get API Key') {
+        vscode.env.openExternal(vscode.Uri.parse('https://platform.openai.com/api-keys'));
+      }
+      return;
+    }
+
+    console.log('Sending loading state to webview');
+    // Show loading state in webview
+    panel.webview.postMessage({
+      command: 'updateSummaryState',
+      hash: currentHash,
+      loading: true
+    });
+
+    console.log('Generating AI summary...');
+    // Generate the summary
+    const { summary, riskAnalysis } = await generateAISummary(currentHash, previousHash);
+
+    console.log('Sending results to webview');
+    // Update webview with the results
+    panel.webview.postMessage({
+      command: 'updateSummaryState',
+      hash: currentHash,
+      loading: false,
+      summary: summary,
+      riskAnalysis: riskAnalysis
+    });
+
+  } catch (error) {
+    console.error('Error handling AI summary:', error);
+    
+    // Show error in webview
+    panel.webview.postMessage({
+      command: 'updateSummaryState',
+      hash: currentHash,
+      loading: false,
+      error: error instanceof Error ? error.message : 'Failed to generate AI summary'
+    });
+
+    vscode.window.showErrorMessage(`Failed to generate AI summary: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+/**
+ * Generate AI summary and risk analysis for a commit
+ */
+async function generateAISummary(currentHash: string, previousHash: string): Promise<{summary: string, riskAnalysis: string}> {
+  console.log('generateAISummary called with:', { currentHash: currentHash.substring(0, 8), previousHash: previousHash.substring(0, 8) });
+  
+  if (!openai) {
+    throw new Error('OpenAI not configured. Please set your API key in settings.');
+  }
+
+  try {
+    // Get the diff between commits
+    console.log('Getting diff between commits...');
+    const diffResult = await git.diff([`${previousHash}..${currentHash}`]);
+    
+    console.log('Diff result length:', diffResult.length);
+    console.log('Diff preview:', diffResult.substring(0, 200) + '...');
+    
+    if (!diffResult || diffResult.trim().length === 0) {
+      console.log('No changes detected in diff');
+      return {
+        summary: 'No changes detected',
+        riskAnalysis: 'No risk - no changes were made'
+      };
+    }
+
+    // Prepare the prompt for OpenAI
+    const prompt = `You are a senior software engineer reviewing code changes. Please analyze this git diff and provide:
+
+1. A concise summary (2-3 sentences) of what changed
+2. A risk analysis (1-2 sentences) highlighting any potential issues
+
+Git diff:
+\`\`\`
+${diffResult.slice(0, 8000)} ${diffResult.length > 8000 ? '... (truncated)' : ''}
+\`\`\`
+
+Please respond in this exact format:
+SUMMARY: [Your summary here]
+RISK: [Your risk analysis here]`;
+
+    console.log('Sending request to OpenAI...');
+    const response = await openai.chat.completions.create({
+      model: 'gpt-3.5-turbo',
+      messages: [
+        {
+          role: 'user',
+          content: prompt
+        }
+      ],
+      max_tokens: 300,
+      temperature: 0.3
+    });
+
+    console.log('OpenAI response received');
+    const content = response.choices[0]?.message?.content || '';
+    console.log('OpenAI response content:', content);
+    
+    // Parse the response
+    const summaryMatch = content.match(/SUMMARY:\s*(.+?)(?=RISK:|$)/s);
+    const riskMatch = content.match(/RISK:\s*(.+?)$/s);
+    
+    const summary = summaryMatch?.[1]?.trim() || 'Unable to generate summary';
+    const riskAnalysis = riskMatch?.[1]?.trim() || 'Unable to analyze risk';
+
+    console.log('Parsed summary:', summary);
+    console.log('Parsed risk analysis:', riskAnalysis);
+
+    return { summary, riskAnalysis };
+  } catch (error) {
+    console.error('Error generating AI summary:', error);
+    throw error;
+  }
+}
+
+/**
  * Restore a snapshot to the current workspace
  */
 async function restoreSnapshot(hash: string) {
@@ -388,7 +590,7 @@ async function restoreSnapshot(hash: string) {
 /**
  * Generate HTML content for the webview
  */
-function getWebviewContent(commits: CommitInfo[]): string {
+function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -522,10 +724,136 @@ function getWebviewContent(commits: CommitInfo[]): string {
         .toggle-files:hover {
             text-decoration: underline;
         }
+        .ai-section {
+            margin-top: 12px;
+            padding: 12px;
+            background: var(--vscode-editor-inactiveSelectionBackground);
+            border-radius: 6px;
+            border-left: 3px solid var(--vscode-textLink-foreground);
+        }
+        .ai-section.hidden {
+            display: none;
+        }
+        .ai-summary {
+            margin-bottom: 8px;
+        }
+        .ai-summary-text {
+            color: var(--vscode-foreground);
+            font-size: 0.9em;
+            line-height: 1.4;
+            margin: 4px 0;
+        }
+        .ai-risk {
+            margin-bottom: 8px;
+        }
+        .ai-risk-text {
+            color: var(--vscode-errorForeground);
+            font-size: 0.85em;
+            line-height: 1.3;
+            margin: 4px 0;
+        }
+        .ai-btn {
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8em;
+            font-weight: 500;
+            margin-left: 8px;
+        }
+        .ai-btn:hover {
+            background: linear-gradient(135deg, #5048e5, #7c3aed);
+        }
+        .ai-btn:disabled {
+            background: #6b7280;
+            cursor: not-allowed;
+        }
+        .ai-btn-disabled {
+            background: #6b7280 !important;
+            cursor: help !important;
+            opacity: 0.8;
+        }
+        .ai-btn-disabled:hover {
+            background: #374151 !important;
+        }
+        .ai-loading {
+            color: var(--vscode-descriptionForeground);
+            font-style: italic;
+            font-size: 0.85em;
+        }
+        .ai-error {
+            color: var(--vscode-errorForeground);
+            font-size: 0.85em;
+        }
+        .api-key-help {
+            background: var(--vscode-editor-inactiveSelectionBackground);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+            border-left: 4px solid #6366f1;
+        }
+        .api-key-help h3 {
+            margin: 0 0 8px 0;
+            color: var(--vscode-foreground);
+            font-size: 1em;
+        }
+        .api-key-help p {
+            margin: 0 0 12px 0;
+            color: var(--vscode-descriptionForeground);
+            font-size: 0.9em;
+            line-height: 1.4;
+        }
+        .setup-btn {
+            background: #6366f1;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85em;
+            font-weight: 500;
+            margin-right: 8px;
+        }
+        .setup-btn:hover {
+            background: #5048e5;
+        }
+        .learn-more-btn {
+            background: transparent;
+            color: var(--vscode-textLink-foreground);
+            border: 1px solid var(--vscode-textLink-foreground);
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85em;
+            text-decoration: none;
+        }
+        .learn-more-btn:hover {
+            background: var(--vscode-textLink-foreground);
+            color: var(--vscode-editor-background);
+        }
     </style>
 </head>
 <body>
     <h1>VibeTrail Timeline</h1>
+    
+    ${!hasApiKey ? `
+        <div class="api-key-help">
+            <h3>🤖 Unlock AI-Powered Change Analysis</h3>
+            <p>VibeTrail can generate smart summaries and risk analysis of your code changes using AI. To enable this feature, you'll need to provide your own OpenAI API key.</p>
+            <div style="background: var(--vscode-inputValidation-warningBackground); border: 1px solid var(--vscode-inputValidation-warningBorder); border-radius: 4px; padding: 8px; margin: 8px 0; font-size: 0.85em; color: #333333;">
+                <strong>⚠️ Important:</strong> Due to VS Code settings behavior, you need to set your API key in <em>both</em> User settings AND Workspace settings for it to work properly.
+            </div>
+            <button class="setup-btn" onclick="openSettings()">
+                Set Up API Key
+            </button>
+            <a href="https://platform.openai.com/api-keys" class="learn-more-btn" target="_blank">
+                Get API Key
+            </a>
+        </div>
+    ` : ''}
     
     ${commits.length === 0 ? `
         <div class="empty-state">
@@ -594,6 +922,29 @@ function getWebviewContent(commits: CommitInfo[]): string {
                             <button class="btn" onclick="restore('${commit.hash}')">
                                 Restore
                             </button>
+                            ${index < commits.length - 1 ? `
+                                <button class="ai-btn ${!hasApiKey ? 'ai-btn-disabled' : ''}" 
+                                        onclick="${hasApiKey ? `generateSummary('${commit.hash}', '${commits[index + 1].hash}')` : 'showApiKeyHelp()'}"
+                                        ${!hasApiKey ? 'title="API key required - click to configure"' : ''}>
+                                    🤖 ${hasApiKey ? 'Summarize' : 'Summarize (API Key Required)'}
+                                </button>
+                            ` : ''}
+                        </div>
+                        
+                        <div id="ai-${commit.hash}" class="ai-section hidden">
+                            <div class="ai-loading" id="ai-loading-${commit.hash}" style="display: none;">
+                                🤖 Analyzing changes...
+                            </div>
+                            <div class="ai-error" id="ai-error-${commit.hash}" style="display: none;">
+                            </div>
+                            <div class="ai-summary" id="ai-summary-${commit.hash}" style="display: none;">
+                                <strong>📝 Summary:</strong>
+                                <div class="ai-summary-text" id="ai-summary-text-${commit.hash}"></div>
+                            </div>
+                            <div class="ai-risk" id="ai-risk-${commit.hash}" style="display: none;">
+                                <strong>⚠️ Risk Analysis:</strong>
+                                <div class="ai-risk-text" id="ai-risk-text-${commit.hash}"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -631,6 +982,68 @@ function getWebviewContent(commits: CommitInfo[]): string {
                 toggleButton.textContent = 'Show Files';
             }
         }
+        
+        function generateSummary(currentHash, previousHash) {
+            vscode.postMessage({
+                command: 'generateSummary',
+                currentHash: currentHash,
+                previousHash: previousHash
+            });
+        }
+        
+        function showApiKeyHelp() {
+            if (confirm('To use AI summaries, you need to set up your OpenAI API key. Would you like to open settings now?')) {
+                openSettings();
+            }
+        }
+        
+        function openSettings() {
+            vscode.postMessage({
+                command: 'openSettings'
+            });
+        }
+        
+        // Handle messages from extension
+        window.addEventListener('message', event => {
+            const message = event.data;
+            
+            if (message.command === 'updateSummaryState') {
+                const hash = message.hash;
+                const aiSection = document.getElementById('ai-' + hash);
+                const loadingDiv = document.getElementById('ai-loading-' + hash);
+                const errorDiv = document.getElementById('ai-error-' + hash);
+                const summaryDiv = document.getElementById('ai-summary-' + hash);
+                const riskDiv = document.getElementById('ai-risk-' + hash);
+                const summaryText = document.getElementById('ai-summary-text-' + hash);
+                const riskText = document.getElementById('ai-risk-text-' + hash);
+                
+                // Show the AI section
+                aiSection.classList.remove('hidden');
+                
+                if (message.loading) {
+                    // Show loading state
+                    loadingDiv.style.display = 'block';
+                    errorDiv.style.display = 'none';
+                    summaryDiv.style.display = 'none';
+                    riskDiv.style.display = 'none';
+                } else if (message.error) {
+                    // Show error state
+                    loadingDiv.style.display = 'none';
+                    errorDiv.style.display = 'block';
+                    errorDiv.textContent = '❌ ' + message.error;
+                    summaryDiv.style.display = 'none';
+                    riskDiv.style.display = 'none';
+                } else {
+                    // Show results
+                    loadingDiv.style.display = 'none';
+                    errorDiv.style.display = 'none';
+                    summaryDiv.style.display = 'block';
+                    riskDiv.style.display = 'block';
+                    summaryText.textContent = message.summary;
+                    riskText.textContent = message.riskAnalysis;
+                }
+            }
+        });
     </script>
 </body>
 </html>`;
