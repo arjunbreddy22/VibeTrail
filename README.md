@@ -79,4 +79,4 @@ We welcome contributions! To get started:
 
 This project is proprietary and closed-source. All rights are reserved.
 
-For licensing information, please contact us at [your-email@example.com](mailto:your-email@example.com).
+For licensing information, please contact us at [arjunreddy5275@gmail.com](mailto:arjunreddy5275@gmail.com).
