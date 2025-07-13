@@ -9,6 +9,7 @@ interface CommitInfo {
   hash: string;
   timestamp: string;
   message: string;
+  prompt: string;
   date: Date;
 }
 
@@ -22,7 +23,7 @@ export function activate(context: vscode.ExtensionContext) {
   initializeShadowRepo();
   
   // Register commands
-  const saveSnapshotCommand = vscode.commands.registerCommand('vibetrail.saveSnapshot', saveSnapshot);
+  const saveSnapshotCommand = vscode.commands.registerCommand('vibetrail.saveSnapshot', () => saveSnapshot());
   const showTimelineCommand = vscode.commands.registerCommand('vibetrail.showTimeline', showTimeline);
   
   context.subscriptions.push(saveSnapshotCommand, showTimelineCommand);
@@ -62,12 +63,32 @@ async function initializeShadowRepo() {
 /**
  * Save a snapshot of the current workspace
  */
-async function saveSnapshot() {
+async function saveSnapshot(prompt?: string) {
   try {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (!workspaceFolder) {
       vscode.window.showErrorMessage('No workspace folder open');
       return;
+    }
+    
+    // If no prompt provided, ask the user for one
+    if (prompt === undefined) {
+      prompt = await vscode.window.showInputBox({
+        title: 'Save Snapshot',
+        prompt: 'What are you working on? (optional)',
+        placeHolder: 'e.g., "Before asking AI to refactor login" or leave empty',
+        validateInput: (value) => {
+          if (value.length > 200) {
+            return 'Prompt must be 200 characters or less';
+          }
+          return null;
+        }
+      });
+      
+      // If user cancelled the input box, don't save
+      if (prompt === undefined) {
+        return;
+      }
     }
     
     const workspacePath = workspaceFolder.uri.fsPath;
@@ -78,9 +99,11 @@ async function saveSnapshot() {
     // Add all files to git
     await git.add('.');
     
-    // Create commit with timestamp
+    // Create commit with timestamp and optional prompt
     const timestamp = new Date().toISOString();
-    const commitMessage = `Snapshot @ ${timestamp}`;
+    const commitMessage = prompt && prompt.trim() 
+      ? `${prompt.trim()} | Snapshot @ ${timestamp}`
+      : `Snapshot @ ${timestamp}`;
     
     await git.commit(commitMessage);
     
@@ -206,12 +229,20 @@ async function getCommitHistory(): Promise<CommitInfo[]> {
   try {
     const log = await git.log();
     
-    return log.all.map(commit => ({
-      hash: commit.hash,
-      timestamp: commit.date,
-      message: commit.message,
-      date: new Date(commit.date)
-    }));
+    return log.all.map(commit => {
+      // Parse prompt from commit message if it exists
+      const messageParts = commit.message.split(' | Snapshot @ ');
+      const prompt = messageParts.length > 1 ? messageParts[0] : '';
+      const timestamp = messageParts.length > 1 ? messageParts[1] : commit.date;
+      
+      return {
+        hash: commit.hash,
+        timestamp: commit.date,
+        message: commit.message,
+        prompt: prompt,
+        date: new Date(commit.date)
+      };
+    });
   } catch (error) {
     console.error('Error getting commit history:', error);
     return [];
@@ -372,6 +403,11 @@ function getWebviewContent(commits: CommitInfo[]): string {
             padding: 40px;
             color: var(--vscode-descriptionForeground);
         }
+        .commit-prompt {
+            font-style: italic;
+            color: var(--vscode-textLink-foreground);
+            margin-bottom: 5px;
+        }
     </style>
 </head>
 <body>
@@ -387,7 +423,8 @@ function getWebviewContent(commits: CommitInfo[]): string {
                 <div class="commit">
                     <div class="commit-header">
                         <div class="commit-info">
-                            <div class="commit-message">${commit.message}</div>
+                            ${commit.prompt ? `<div class="commit-prompt">"${commit.prompt}"</div>` : ''}
+                            <div class="commit-message">${commit.prompt ? 'Snapshot' : commit.message}</div>
                             <div class="commit-details">
                                 <div>Hash: ${commit.hash.substring(0, 8)}</div>
                                 <div>Date: ${new Date(commit.timestamp).toLocaleString()}</div>
