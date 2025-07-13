@@ -1,70 +1,82 @@
-# VibeTrail VS Code Extension
+# VibeTrail: Your Personal Coding Journey Tracker
 
-**Track your coding journey with automatic workspace snapshots**
+![Version](https://img.shields.io/badge/version-0.0.1-blue)
 
-VibeTrail is a VS Code extension that creates a shadow Git repository to track snapshots of your workspace over time. Perfect for keeping a history of your coding progress without cluttering your main Git repository.
 
-## Features
+**VibeTrail is a Visual Studio Code extension that automatically tracks your coding progress by creating snapshots of your workspace. It’s like a personal time machine for your code, allowing you to look back at your work without cluttering your main Git history.**
 
-- 🏠 **Shadow Repository**: Creates a hidden Git repository at `~/.vibetrail/` to store your snapshots
-- 📸 **Easy Snapshots**: Save workspace snapshots with a single command
-- 📚 **Timeline View**: Browse all your snapshots in a beautiful timeline interface
-- 🔍 **Diff Viewer**: Compare changes between snapshots
-- 🔄 **Restore Functionality**: Restore any previous snapshot to your workspace
+Whether you're experimenting with a new feature, refactoring a complex module, or just want a private record of your daily progress, VibeTrail has you covered.
 
-## Commands
+## ✨ Key Features
 
-- **VibeTrail: Save Snapshot** - Captures current workspace state and creates a commit
-- **VibeTrail: Show Timeline** - Opens the timeline view to browse all snapshots
+- 🏠 **Shadow Repository**: VibeTrail creates a hidden Git repository in your home directory (`~/.vibetrail/`) to store your snapshots, keeping your project's primary repository clean.
+- 📸 **Effortless Snapshots**: Save a complete snapshot of your workspace with a single command. Add a message to remember what you were working on.
+- 📚 **Interactive Timeline**: Browse your snapshots in a beautiful and intuitive timeline view. See every change you've made in chronological order.
+- 🔍 **Visual Diff Viewer**: Compare any two snapshots to see exactly what changed. The color-coded diff view makes it easy to spot additions, modifications, and deletions.
+- 🔄 **One-Click Restore**: Instantly restore your entire workspace to any previous snapshot. It's a safe and easy way to undo changes or go back to a known good state.
+- 🤖 **AI-Powered Analysis (Optional)**:
+  - **Smart Summaries**: Let AI generate concise, human-readable summaries of the changes between snapshots.
+  - **Risk Assessment**: Get an AI-powered analysis of potential risks or issues in your code changes.
 
-## How It Works
+## 🚀 Getting Started
 
-1. **Activation**: On first use, VibeTrail creates a hidden Git repository at `~/.vibetrail/`
-2. **Snapshots**: When you save a snapshot, it copies your workspace files (excluding common ignore patterns) to the shadow repo and creates a Git commit
-3. **Timeline**: View all your snapshots in chronological order with timestamps and commit hashes
-4. **Diff View**: Compare any two snapshots to see what changed
-5. **Restore**: Restore any previous snapshot back to your workspace
+1.  **Install Dependencies**:
+    ```bash
+    npm install
+    ```
+2.  **Compile the Extension**:
+    ```bash
+    npm run compile
+    ```
+3.  **Run in VS Code**:
+    - Press `F5` to open a new Extension Development Host window.
+    - Open any workspace to start using VibeTrail.
 
-## Installation
+## 💻 How to Use
 
-1. Install dependencies:
-   ```bash
-   npm install
-   ```
+1.  **Open the Command Palette**: `Ctrl+Shift+P` (or `Cmd+Shift+P` on Mac).
+2.  **Save a Snapshot**:
+    - Run the **`VibeTrail: Save Snapshot`** command.
+    - Enter an optional message to describe your work (e.g., "Before refactoring the login page").
+3.  **View Your Timeline**:
+    - Run the **`VibeTrail: Show Timeline`** command.
+    - In the timeline, you can:
+      - **View Diffs**: See the changes between any two snapshots.
+      - **Restore**: Revert your workspace to a previous state.
+      - **Generate AI Summaries**: Get AI-powered insights into your changes (requires configuration).
 
-2. Compile the extension:
-   ```bash
-   npm run compile
-   ```
+## ⚙️ Configuration
 
-3. Press `F5` to run the extension in a new Extension Development Host window
+To enable the AI-powered features, you need to provide an OpenAI API key:
 
-## Usage
+1.  **Get an API Key**: If you don't have one, you can get a key from the [OpenAI Platform](https://platform.openai.com/api-keys).
+2.  **Open VS Code Settings**: Go to **File > Preferences > Settings** (or `Ctrl+,`).
+3.  **Set the API Key**:
+    - Search for **`VibeTrail`**.
+    - In the **`VibeTrail: OpenAI API Key`** field, enter your API key.
+    - **Important**: For the best experience, set the API key in both your **User** and **Workspace** settings.
 
-1. Open any workspace in VS Code
-2. Use `Ctrl+Shift+P` (or `Cmd+Shift+P` on Mac) to open the command palette
-3. Run "VibeTrail: Save Snapshot" to create your first snapshot
-4. Run "VibeTrail: Show Timeline" to view all snapshots
-5. In the timeline, use "View Diff" to see changes or "Restore" to restore a snapshot
+## 📁 What Gets Tracked
 
-## What Gets Tracked
+VibeTrail is smart about what it tracks. It ignores common development files and directories, including:
 
-VibeTrail tracks all files in your workspace except:
 - `node_modules/`
 - `.git/`
 - `.vscode/`
 - `out/`, `dist/`, `build/`
 - `.DS_Store`, `Thumbs.db`
 
-## Development
+## 🤝 Contributing
 
-To contribute to VibeTrail:
+We welcome contributions! To get started:
 
-1. Clone the repository
-2. Install dependencies: `npm install`
-3. Start the watch mode: `npm run watch`
-4. Press `F5` to launch the extension
+1.  Clone this repository.
+2.  Install dependencies: `npm install`.
+3.  Start the watch mode to automatically recompile on changes: `npm run watch`.
+4.  Press `F5` to launch the extension in a new VS Code window.
 
-## License
+## 📄 License
 
-MIT License - see LICENSE file for details 
+This project is proprietary and closed-source. All rights are reserved.
+
+For licensing information, please contact us at [your-email@example.com](mailto:your-email@example.com).
