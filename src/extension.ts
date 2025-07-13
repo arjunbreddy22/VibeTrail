@@ -42,6 +42,10 @@ export function activate(context: vscode.ExtensionContext) {
   // Initialize OpenAI
   initializeOpenAI();
   
+  // Register virtual file system provider
+  const fileSystemProvider = new GitSnapshotFileSystemProvider(git);
+  const fileSystemDisposable = vscode.workspace.registerFileSystemProvider('vibetrail', fileSystemProvider);
+  
   // Listen for configuration changes
   const configChangeListener = vscode.workspace.onDidChangeConfiguration(async event => {
     if (event.affectsConfiguration('vibetrail.openaiApiKey')) {
@@ -62,7 +66,7 @@ export function activate(context: vscode.ExtensionContext) {
   const saveSnapshotCommand = vscode.commands.registerCommand('vibetrail.saveSnapshot', () => saveSnapshot());
   const showTimelineCommand = vscode.commands.registerCommand('vibetrail.showTimeline', showTimeline);
   
-  context.subscriptions.push(saveSnapshotCommand, showTimelineCommand, configChangeListener);
+  context.subscriptions.push(saveSnapshotCommand, showTimelineCommand, configChangeListener, fileSystemDisposable);
 }
 
 /**
@@ -280,6 +284,9 @@ async function showTimeline() {
           case 'viewDiff':
             viewDiff(message.currentHash, message.previousHash);
             break;
+          case 'viewFileDiff':
+            viewFileDiff(message.filePath, message.currentHash, message.previousHash);
+            break;
           case 'restore':
             restoreSnapshot(message.hash);
             break;
@@ -372,22 +379,117 @@ async function getCommitHistory(): Promise<CommitInfo[]> {
 }
 
 /**
- * View diff between two commits
+ * View diff between two commits using VS Code's built-in diff editor
  */
 async function viewDiff(currentHash: string, previousHash: string) {
   try {
-    const diffResult = await git.diff([`${previousHash}..${currentHash}`]);
+    // Get the list of changed files
+    const diffSummary = await git.diffSummary([previousHash, currentHash]);
+    const changedFiles = diffSummary.files;
     
-    const doc = await vscode.workspace.openTextDocument({
-      content: diffResult,
-      language: 'diff'
+    if (changedFiles.length === 0) {
+      vscode.window.showInformationMessage('No changes between these snapshots');
+      return;
+    }
+    
+    // If only one file changed, show it directly
+    if (changedFiles.length === 1) {
+      await viewFileDiff(changedFiles[0].file, currentHash, previousHash);
+      return;
+    }
+    
+    // If multiple files changed, show a picker
+    const fileItems = changedFiles.map(file => ({
+      label: file.file,
+      description: getFileChangeDescription(file),
+      detail: `${('insertions' in file ? file.insertions : 0) || 0} additions, ${('deletions' in file ? file.deletions : 0) || 0} deletions`
+    }));
+    
+    const selectedFile = await vscode.window.showQuickPick(fileItems, {
+      placeHolder: 'Select a file to view diff',
+      matchOnDescription: true
     });
     
-    await vscode.window.showTextDocument(doc);
+    if (selectedFile) {
+      await viewFileDiff(selectedFile.label, currentHash, previousHash);
+    }
   } catch (error) {
     console.error('Error viewing diff:', error);
     vscode.window.showErrorMessage('Failed to view diff');
   }
+}
+
+/**
+ * View diff for a specific file between two commits
+ */
+async function viewFileDiff(filePath: string, currentHash: string, previousHash: string) {
+  try {
+    const currentUri = vscode.Uri.parse(`vibetrail://${currentHash}/${filePath}`);
+    const previousUri = vscode.Uri.parse(`vibetrail://${previousHash}/${filePath}`);
+    
+    const title = `${path.basename(filePath)} (${previousHash.substring(0, 8)} ↔ ${currentHash.substring(0, 8)})`;
+    
+    await vscode.commands.executeCommand(
+      'vscode.diff',
+      previousUri,
+      currentUri,
+      title
+    );
+  } catch (error) {
+    console.error('Error viewing file diff:', error);
+    vscode.window.showErrorMessage(`Failed to view diff for ${filePath}`);
+  }
+}
+
+/**
+ * Get a friendly description of file changes
+ */
+function getFileChangeDescription(file: any): string {
+  const insertions = ('insertions' in file ? file.insertions : 0) || 0;
+  const deletions = ('deletions' in file ? file.deletions : 0) || 0;
+  
+  if (insertions > 0 && deletions === 0) {
+    return 'Added';
+  } else if (insertions === 0 && deletions > 0) {
+    return 'Deleted';
+  } else if (insertions > 0 && deletions > 0) {
+    return 'Modified';
+  } else {
+    return 'Changed';
+  }
+}
+
+/**
+ * Generate a friendly summary of changes for a commit
+ */
+function getChangeSummary(commit: CommitInfo): string {
+  if (!commit.fileDetails || commit.fileDetails.length === 0) {
+    return 'No specific changes detected';
+  }
+  
+  const addedFiles = commit.fileDetails.filter(f => f.status === 'added');
+  const modifiedFiles = commit.fileDetails.filter(f => f.status === 'modified');
+  const deletedFiles = commit.fileDetails.filter(f => f.status === 'deleted');
+  
+  const parts: string[] = [];
+  
+  if (addedFiles.length > 0) {
+    parts.push(`Added ${addedFiles.length} ${addedFiles.length === 1 ? 'file' : 'files'}`);
+  }
+  
+  if (modifiedFiles.length > 0) {
+    parts.push(`Modified ${modifiedFiles.length} ${modifiedFiles.length === 1 ? 'file' : 'files'}`);
+  }
+  
+  if (deletedFiles.length > 0) {
+    parts.push(`Deleted ${deletedFiles.length} ${deletedFiles.length === 1 ? 'file' : 'files'}`);
+  }
+  
+  if (parts.length === 0) {
+    return 'Files changed';
+  }
+  
+  return parts.join(', ');
 }
 
 /**
@@ -678,6 +780,12 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
             align-items: center;
             gap: 4px;
         }
+        .change-summary {
+            font-size: 0.9em;
+            color: var(--vscode-textLink-foreground);
+            margin: 6px 0;
+            font-style: italic;
+        }
         .file-changes {
             margin-top: 10px;
             padding: 8px;
@@ -697,6 +805,34 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
         }
         .file-change-item:last-child {
             border-bottom: none;
+        }
+        .clickable-file {
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 4px;
+            transition: background-color 0.2s;
+        }
+        .clickable-file:hover {
+            background-color: var(--vscode-list-hoverBackground);
+        }
+        .file-status {
+            font-size: 0.7em;
+            padding: 2px 6px;
+            border-radius: 3px;
+            margin-right: 8px;
+            font-weight: 500;
+        }
+        .file-status.added {
+            background-color: rgba(40, 167, 69, 0.2);
+            color: #28a745;
+        }
+        .file-status.modified {
+            background-color: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+        }
+        .file-status.deleted {
+            background-color: rgba(220, 53, 69, 0.2);
+            color: #dc3545;
         }
         .file-name {
             font-family: var(--vscode-editor-font-family);
@@ -723,6 +859,12 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
         }
         .toggle-files:hover {
             text-decoration: underline;
+        }
+        .file-help-text {
+            font-size: 0.75em;
+            color: var(--vscode-descriptionForeground);
+            margin-left: 12px;
+            font-style: italic;
         }
         .ai-section {
             margin-top: 12px;
@@ -874,19 +1016,25 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
                             <div class="commit-stats">
                                 <div class="stat-item">
                                     <span>📄</span>
-                                    <span>${commit.filesChanged} files changed</span>
+                                    <span>${commit.filesChanged} ${commit.filesChanged === 1 ? 'file' : 'files'} changed</span>
                                 </div>
                                 ${commit.linesAdded > 0 ? `
                                     <div class="stat-item lines-added">
-                                        <span>+${commit.linesAdded}</span>
+                                        <span>+${commit.linesAdded} ${commit.linesAdded === 1 ? 'line' : 'lines'}</span>
                                     </div>
                                 ` : ''}
                                 ${commit.linesRemoved > 0 ? `
                                     <div class="stat-item lines-removed">
-                                        <span>-${commit.linesRemoved}</span>
+                                        <span>-${commit.linesRemoved} ${commit.linesRemoved === 1 ? 'line' : 'lines'}</span>
                                     </div>
                                 ` : ''}
                             </div>
+                            
+                            ${commit.filesChanged > 0 ? `
+                                <div class="change-summary">
+                                    ${getChangeSummary(commit)}
+                                </div>
+                            ` : ''}
                             
                             <div class="commit-details">
                                 <div>Hash: ${commit.hash.substring(0, 8)}</div>
@@ -895,15 +1043,20 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
                                     <button id="toggle-${commit.hash}" class="toggle-files" onclick="toggleFiles('${commit.hash}')">
                                         Show Files
                                     </button>
+                                    <span class="file-help-text" id="help-${commit.hash}" style="display: none;">
+                                        💡 Click on any file to view its diff
+                                    </span>
                                 ` : ''}
                             </div>
                             
                             ${commit.filesChanged > 0 ? `
                                 <div id="files-${commit.hash}" class="file-changes collapsed">
                                     ${commit.fileDetails?.map(file => `
-                                        <div class="file-change-item">
+                                        <div class="file-change-item clickable-file" 
+                                             onclick="viewFileDiff('${file.filename}', '${commit.hash}', '${index < commits.length - 1 ? commits[index + 1].hash : commit.hash}')">
                                             <div class="file-name">${file.filename}</div>
                                             <div class="file-stats">
+                                                <span class="file-status ${file.status}">${file.status}</span>
                                                 ${file.linesAdded > 0 ? `<span class="lines-added">+${file.linesAdded}</span>` : ''}
                                                 ${file.linesRemoved > 0 ? `<span class="lines-removed">-${file.linesRemoved}</span>` : ''}
                                             </div>
@@ -916,17 +1069,17 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
                         <div class="commit-actions">
                             ${index < commits.length - 1 ? `
                                 <button class="btn btn-secondary" onclick="viewDiff('${commit.hash}', '${commits[index + 1].hash}')">
-                                    View Diff
+                                    📊 View Changes
                                 </button>
                             ` : ''}
                             <button class="btn" onclick="restore('${commit.hash}')">
-                                Restore
+                                🔄 Restore
                             </button>
                             ${index < commits.length - 1 ? `
                                 <button class="ai-btn ${!hasApiKey ? 'ai-btn-disabled' : ''}" 
                                         onclick="${hasApiKey ? `generateSummary('${commit.hash}', '${commits[index + 1].hash}')` : 'showApiKeyHelp()'}"
                                         ${!hasApiKey ? 'title="API key required - click to configure"' : ''}>
-                                    🤖 ${hasApiKey ? 'Summarize' : 'Summarize (API Key Required)'}
+                                    🤖 ${hasApiKey ? 'AI Summary' : 'AI Summary (API Key Required)'}
                                 </button>
                             ` : ''}
                         </div>
@@ -963,6 +1116,15 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
             });
         }
         
+        function viewFileDiff(filePath, currentHash, previousHash) {
+            vscode.postMessage({
+                command: 'viewFileDiff',
+                filePath: filePath,
+                currentHash: currentHash,
+                previousHash: previousHash
+            });
+        }
+        
         function restore(hash) {
             vscode.postMessage({
                 command: 'restore',
@@ -973,13 +1135,16 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
         function toggleFiles(commitHash) {
             const filesDiv = document.getElementById('files-' + commitHash);
             const toggleButton = document.getElementById('toggle-' + commitHash);
+            const helpText = document.getElementById('help-' + commitHash);
             
             if (filesDiv.classList.contains('collapsed')) {
                 filesDiv.classList.remove('collapsed');
                 toggleButton.textContent = 'Hide Files';
+                if (helpText) helpText.style.display = 'inline';
             } else {
                 filesDiv.classList.add('collapsed');
                 toggleButton.textContent = 'Show Files';
+                if (helpText) helpText.style.display = 'none';
             }
         }
         
@@ -1047,6 +1212,75 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
     </script>
 </body>
 </html>`;
+}
+
+/**
+ * Virtual file system provider for Git snapshots
+ */
+class GitSnapshotFileSystemProvider implements vscode.FileSystemProvider {
+  private readonly _onDidChangeFile = new vscode.EventEmitter<vscode.FileChangeEvent[]>();
+  readonly onDidChangeFile = this._onDidChangeFile.event;
+
+  constructor(private git: SimpleGit) {}
+
+  watch(): vscode.Disposable {
+    return new vscode.Disposable(() => {});
+  }
+
+  async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
+    const [commitHash, filePath] = this.parseUri(uri);
+    
+    try {
+      // Check if file exists in the commit
+      await this.git.show(`${commitHash}:${filePath}`);
+      return {
+        type: vscode.FileType.File,
+        ctime: 0,
+        mtime: 0,
+        size: 0
+      };
+    } catch {
+      throw vscode.FileSystemError.FileNotFound(uri);
+    }
+  }
+
+  async readFile(uri: vscode.Uri): Promise<Uint8Array> {
+    const [commitHash, filePath] = this.parseUri(uri);
+    
+    try {
+      const content = await this.git.show(`${commitHash}:${filePath}`);
+      return Buffer.from(content, 'utf8');
+    } catch (error) {
+      throw vscode.FileSystemError.FileNotFound(uri);
+    }
+  }
+
+  private parseUri(uri: vscode.Uri): [string, string] {
+    // URI format: vibetrail://commit-hash/file/path
+    const commitHash = uri.authority;
+    const filePath = uri.path.substring(1); // Remove leading slash
+    return [commitHash, filePath];
+  }
+
+  writeFile(): void {
+    throw vscode.FileSystemError.NoPermissions('Read-only file system');
+  }
+
+  rename(): void {
+    throw vscode.FileSystemError.NoPermissions('Read-only file system');
+  }
+
+  delete(): void {
+    throw vscode.FileSystemError.NoPermissions('Read-only file system');
+  }
+
+  createDirectory(): void {
+    throw vscode.FileSystemError.NoPermissions('Read-only file system');
+  }
+
+  readDirectory(): [string, vscode.FileType][] {
+    throw vscode.FileSystemError.NoPermissions('Not supported');
+  }
 }
 
 export function deactivate() {} 
