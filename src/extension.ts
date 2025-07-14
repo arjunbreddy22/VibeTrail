@@ -32,32 +32,38 @@ let shadowRepoPath: string;
 let git: SimpleGit;
 let openai: OpenAI | null = null;
 let activeTimelinePanel: vscode.WebviewPanel | null = null;
+let isProUser: boolean = false;
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('VibeTrail extension is now active!');
   
   // Initialize shadow Git repo on activation
-  initializeShadowRepo();
+  initializeShadowRepo().then(() => {
+    // Register virtual file system provider only after Git is initialized
+    const fileSystemProvider = new GitSnapshotFileSystemProvider(git);
+    const fileSystemDisposable = vscode.workspace.registerFileSystemProvider('vibetrail', fileSystemProvider);
+    context.subscriptions.push(fileSystemDisposable);
+    console.log('Virtual file system provider registered successfully');
+  }).catch(error => {
+    console.error('Failed to initialize VibeTrail:', error);
+    vscode.window.showErrorMessage('Failed to initialize VibeTrail. Some features may not work properly.');
+  });
   
   // Initialize OpenAI
   initializeOpenAI();
   
-  // Register virtual file system provider
-  const fileSystemProvider = new GitSnapshotFileSystemProvider(git);
-  const fileSystemDisposable = vscode.workspace.registerFileSystemProvider('vibetrail', fileSystemProvider);
-  
   // Listen for configuration changes
   const configChangeListener = vscode.workspace.onDidChangeConfiguration(async event => {
-    if (event.affectsConfiguration('vibetrail.openaiApiKey')) {
-      console.log('OpenAI API key configuration changed, reinitializing...');
+    if (event.affectsConfiguration('vibetrail.openaiApiKey') || event.affectsConfiguration('vibetrail.proLicenseKey')) {
+      console.log('VibeTrail configuration changed, reinitializing...');
       initializeOpenAI();
       
       // Refresh the timeline if it's open
       if (activeTimelinePanel) {
         const commits = await getCommitHistory();
         const hasApiKey = !!openai;
-        activeTimelinePanel.webview.html = getWebviewContent(commits, hasApiKey);
-        console.log('Timeline refreshed with new API key status:', hasApiKey);
+        activeTimelinePanel.webview.html = getWebviewContent(commits, hasApiKey, isProUser);
+        console.log('Timeline refreshed with new Pro status:', isProUser, 'API key status:', hasApiKey);
       }
     }
   });
@@ -65,8 +71,24 @@ export function activate(context: vscode.ExtensionContext) {
   // Register commands
   const saveSnapshotCommand = vscode.commands.registerCommand('vibetrail.saveSnapshot', () => saveSnapshot());
   const showTimelineCommand = vscode.commands.registerCommand('vibetrail.showTimeline', showTimeline);
+  const repairRepoCommand = vscode.commands.registerCommand('vibetrail.repairRepository', async () => {
+    const result = await vscode.window.showWarningMessage(
+      'This will attempt to repair the VibeTrail repository by resetting its state. Continue?',
+      'Yes',
+      'No'
+    );
+    
+    if (result === 'Yes') {
+      const repaired = await repairGitRepository();
+      if (repaired) {
+        vscode.window.showInformationMessage('VibeTrail repository repaired successfully');
+      } else {
+        vscode.window.showErrorMessage('Failed to repair VibeTrail repository');
+      }
+    }
+  });
   
-  context.subscriptions.push(saveSnapshotCommand, showTimelineCommand, configChangeListener, fileSystemDisposable);
+  context.subscriptions.push(saveSnapshotCommand, showTimelineCommand, repairRepoCommand, configChangeListener);
 }
 
 /**
@@ -93,6 +115,12 @@ async function initializeShadowRepo() {
       console.log('Shadow Git repository initialized at:', shadowRepoPath);
     } else {
       console.log('Shadow Git repository already exists at:', shadowRepoPath);
+      
+      // Validate repository integrity
+      const isHealthy = await validateRepositoryHealth();
+      if (!isHealthy) {
+        console.warn('Repository health check failed, but continuing...');
+      }
     }
   } catch (error) {
     console.error('Error initializing shadow repository:', error);
@@ -101,23 +129,85 @@ async function initializeShadowRepo() {
 }
 
 /**
- * Initialize OpenAI client
+ * Validate the health of the Git repository
+ */
+async function validateRepositoryHealth(): Promise<boolean> {
+  try {
+    // Check if .git directory exists and is accessible
+    const gitDir = path.join(shadowRepoPath, '.git');
+    if (!fs.existsSync(gitDir)) {
+      console.error('Git directory does not exist');
+      return false;
+    }
+    
+    // Verify we can read Git status
+    await git.status();
+    
+    // Try to get at least one commit (if any exist)
+    try {
+      const log = await git.log({ maxCount: 1 });
+      console.log(`Repository healthy: ${log.total} commits found`);
+    } catch (logError) {
+      // No commits yet is fine for a new repository
+      console.log('Repository is empty (no commits), which is fine for new installations');
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('Repository health check failed:', error);
+    return false;
+  }
+}
+
+/**
+ * Check if user has a valid Pro license
+ */
+function checkProLicense(): boolean {
+  try {
+    const config = vscode.workspace.getConfiguration('vibetrail');
+    const licenseKey = config.get<string>('proLicenseKey');
+    
+    if (!licenseKey || !licenseKey.trim()) {
+      return false;
+    }
+    
+    // Simple license validation (you can make this more sophisticated)
+    // For now, any non-empty key is considered valid
+    // In production, you'd validate against your licensing server
+    return licenseKey.trim().length > 10;
+  } catch (error) {
+    console.error('Error checking Pro license:', error);
+    return false;
+  }
+}
+
+/**
+ * Initialize OpenAI client (only for Pro users)
  */
 function initializeOpenAI() {
   try {
+    // Check Pro license first
+    isProUser = checkProLicense();
+    
+    if (!isProUser) {
+      openai = null;
+      console.log('Pro license not found - AI features disabled');
+      return;
+    }
+    
     const config = vscode.workspace.getConfiguration('vibetrail');
     const apiKey = config.get<string>('openaiApiKey');
     
-    console.log('Initializing OpenAI with API key present:', !!apiKey);
+    console.log('Initializing OpenAI for Pro user with API key present:', !!apiKey);
     
     if (apiKey && apiKey.trim()) {
       openai = new OpenAI({
         apiKey: apiKey.trim()
       });
-      console.log('OpenAI client initialized successfully');
+      console.log('OpenAI client initialized successfully for Pro user');
     } else {
       openai = null;
-      console.log('OpenAI API key not configured or empty');
+      console.log('OpenAI API key not configured');
     }
   } catch (error) {
     console.error('Error initializing OpenAI:', error);
@@ -134,6 +224,20 @@ async function saveSnapshot(prompt?: string) {
     if (!workspaceFolder) {
       vscode.window.showErrorMessage('No workspace folder open');
       return;
+    }
+    
+    // Pre-flight check: Validate repository health before saving
+    const isHealthy = await validateRepositoryHealth();
+    if (!isHealthy) {
+      const shouldContinue = await vscode.window.showWarningMessage(
+        'Repository health check failed. Continuing may risk data loss. Do you want to proceed?',
+        'Proceed Anyway',
+        'Cancel'
+      );
+      
+      if (shouldContinue !== 'Proceed Anyway') {
+        return;
+      }
     }
     
     // If no prompt provided, ask the user for one
@@ -158,7 +262,7 @@ async function saveSnapshot(prompt?: string) {
     
     const workspacePath = workspaceFolder.uri.fsPath;
     
-    // Copy all workspace files to shadow repo
+    // Copy all workspace files to shadow repo (with safety checks)
     await copyWorkspaceFiles(workspacePath, shadowRepoPath);
     
     // Add all files to git
@@ -172,10 +276,32 @@ async function saveSnapshot(prompt?: string) {
     
     await git.commit(commitMessage);
     
+    // Post-save verification
+    try {
+      const latestCommit = await git.log({ maxCount: 1 });
+      if (latestCommit.latest && latestCommit.latest.message === commitMessage) {
+        console.log('Snapshot successfully verified');
+      }
+    } catch (verifyError) {
+      console.warn('Could not verify snapshot was saved:', verifyError);
+    }
+    
     vscode.window.showInformationMessage(`Snapshot saved: ${commitMessage}`);
   } catch (error) {
     console.error('Error saving snapshot:', error);
-    vscode.window.showErrorMessage('Failed to save snapshot');
+    
+    // Enhanced error reporting
+    if (error instanceof Error) {
+      if (error.message.includes('Git directory not found')) {
+        vscode.window.showErrorMessage('Failed to save snapshot: Git repository corrupted. Try running "Repair Repository" command.');
+      } else if (error.message.includes('not accessible')) {
+        vscode.window.showErrorMessage('Failed to save snapshot: Git repository not accessible. Check file permissions.');
+      } else {
+        vscode.window.showErrorMessage(`Failed to save snapshot: ${error.message}`);
+      }
+    } else {
+      vscode.window.showErrorMessage('Failed to save snapshot: Unknown error');
+    }
   }
 }
 
@@ -186,6 +312,9 @@ async function copyWorkspaceFiles(source: string, destination: string) {
   const ignorePatterns = [
     'node_modules',
     '.git',
+    '.gitignore',
+    '.gitattributes',
+    '.gitmodules',
     '.vscode',
     'out',
     'dist',
@@ -197,6 +326,21 @@ async function copyWorkspaceFiles(source: string, destination: string) {
     '.venv',
     '.env'
   ];
+  
+  // SAFETY CHECK: Validate Git repository before cleaning
+  const gitDir = path.join(destination, '.git');
+  if (!fs.existsSync(gitDir)) {
+    throw new Error('Git directory not found in destination. Aborting to prevent data loss.');
+  }
+  
+  // Verify Git repository is accessible before proceeding
+  try {
+    const tempGit = simpleGit(destination);
+    await tempGit.status();
+  } catch (error) {
+    console.error('Git repository validation failed:', error);
+    throw new Error('Git repository is not accessible. Aborting to prevent data loss.');
+  }
   
   const copyRecursive = (src: string, dest: string) => {
     const stat = fs.statSync(src);
@@ -231,15 +375,21 @@ async function copyWorkspaceFiles(source: string, destination: string) {
     }
   };
   
-  // Clean destination directory (except .git)
+  // SAFER CLEANUP: Clean destination directory (except .git) with additional safeguards
   const files = fs.readdirSync(destination);
   files.forEach(file => {
+    // CRITICAL: Never touch .git directory
     if (file !== '.git') {
       const filePath = path.join(destination, file);
+      try {
       if (fs.statSync(filePath).isDirectory()) {
-        fs.rmSync(filePath, { recursive: true });
+          fs.rmSync(filePath, { recursive: true, force: true });
       } else {
         fs.unlinkSync(filePath);
+        }
+      } catch (cleanupError) {
+        console.warn(`Failed to remove ${file} during cleanup:`, cleanupError);
+        // Continue with other files even if one fails
       }
     }
   });
@@ -279,7 +429,7 @@ async function showTimeline() {
       activeTimelinePanel = null;
     });
     
-    panel.webview.html = getWebviewContent(commits, hasApiKey);
+    panel.webview.html = getWebviewContent(commits, hasApiKey, isProUser);
     
     // Handle messages from webview
     panel.webview.onDidReceiveMessage(
@@ -301,6 +451,9 @@ async function showTimeline() {
           case 'openSettings':
             vscode.commands.executeCommand('workbench.action.openSettings', 'vibetrail.openaiApiKey');
             break;
+          case 'openExternal':
+            vscode.env.openExternal(vscode.Uri.parse(message.url));
+            break;
         }
       }
     );
@@ -315,7 +468,19 @@ async function showTimeline() {
  */
 async function getCommitHistory(): Promise<CommitInfo[]> {
   try {
+    // Pre-check: Validate repository health
+    const isHealthy = await validateRepositoryHealth();
+    if (!isHealthy) {
+      console.warn('Repository health check failed, returning empty history');
+      return [];
+    }
+    
     const log = await git.log();
+    
+    if (!log || !log.all || log.all.length === 0) {
+      console.log('No commits found in repository');
+      return [];
+    }
     
     const commits: CommitInfo[] = [];
     
@@ -339,9 +504,10 @@ async function getCommitHistory(): Promise<CommitInfo[]> {
           // Get diff stats between this commit and previous
           const diffSummary = await git.diffSummary([previousCommit.hash, commit.hash]);
           
+          if (diffSummary && diffSummary.files) {
           filesChanged = diffSummary.files.length;
-          linesAdded = diffSummary.insertions;
-          linesRemoved = diffSummary.deletions;
+            linesAdded = diffSummary.insertions || 0;
+            linesRemoved = diffSummary.deletions || 0;
           
           // Get file details
           fileDetails = diffSummary.files.map(file => {
@@ -357,9 +523,11 @@ async function getCommitHistory(): Promise<CommitInfo[]> {
                      insertions === 0 && deletions > 0 ? 'deleted' : 'modified'
             };
           });
+          }
         }
       } catch (diffError) {
-        console.warn('Could not analyze diff for commit:', commit.hash);
+        console.warn(`Could not analyze diff for commit ${commit.hash.substring(0, 8)}:`, diffError);
+        // Continue with this commit but without diff stats
       }
       
       commits.push({
@@ -375,10 +543,122 @@ async function getCommitHistory(): Promise<CommitInfo[]> {
       });
     }
     
+    console.log(`Successfully loaded ${commits.length} commits from history`);
     return commits;
   } catch (error) {
     console.error('Error getting commit history:', error);
+    
+    // Try to provide more specific error information
+    if (error instanceof Error) {
+      if (error.message.includes('not a git repository')) {
+        console.error('Shadow repository is not a valid Git repository');
+      } else if (error.message.includes('permission')) {
+        console.error('Permission denied accessing Git repository');
+      }
+    }
+    
     return [];
+  }
+}
+
+/**
+ * Repair Git repository state if corrupted
+ */
+async function repairGitRepository(): Promise<boolean> {
+  try {
+    console.log('Attempting to repair Git repository...');
+    
+    // First, check if the repository directory exists
+    if (!fs.existsSync(shadowRepoPath)) {
+      console.log('Shadow repository directory does not exist, recreating...');
+      await initializeShadowRepo();
+      return true;
+    }
+    
+    // Check if .git directory exists
+    const gitDir = path.join(shadowRepoPath, '.git');
+    if (!fs.existsSync(gitDir)) {
+      console.log('Git directory missing, reinitializing repository...');
+      await git.init();
+      console.log('Repository reinitialized successfully');
+      return true;
+    }
+    
+    // Try basic Git operations to test repository health
+    try {
+      await git.status();
+      console.log('Repository status check passed');
+    } catch (statusError) {
+      console.warn('Repository status check failed, attempting to fix...');
+      
+      // Try to reinitialize if status fails
+      try {
+        await git.init();
+        console.log('Repository reinitialized due to status failure');
+      } catch (reinitError) {
+        console.error('Failed to reinitialize repository:', reinitError);
+        return false;
+      }
+    }
+    
+    // Reset to HEAD to clean up any uncommitted changes (only if we have commits)
+    try {
+      const log = await git.log({ maxCount: 1 });
+      if (log.total > 0) {
+        await git.reset(['--hard', 'HEAD']);
+        console.log('Reset to HEAD completed');
+      } else {
+        console.log('No commits found, skipping reset');
+      }
+    } catch (resetError) {
+      console.warn('Reset operation failed (this may be normal for empty repos):', resetError);
+    }
+    
+    // Clean untracked files
+    try {
+      await git.clean('f', ['-d']);
+      console.log('Cleaned untracked files');
+    } catch (cleanError) {
+      console.warn('Clean operation failed:', cleanError);
+    }
+    
+    // Final verification
+    const isRepo = await git.checkIsRepo();
+    if (!isRepo) {
+      console.error('Repository is still not valid after repair attempt');
+      return false;
+    }
+    
+    // Test that we can perform basic operations
+    try {
+      await git.status();
+      console.log('Final repository health check passed');
+    } catch (finalError) {
+      console.error('Final health check failed:', finalError);
+      return false;
+    }
+    
+    console.log('Git repository repaired successfully');
+    return true;
+  } catch (error) {
+    console.error('Failed to repair Git repository:', error);
+    
+    // Last resort: try to completely reinitialize
+    try {
+      console.log('Attempting complete repository reinitialization...');
+      if (fs.existsSync(shadowRepoPath)) {
+        const gitDir = path.join(shadowRepoPath, '.git');
+        if (fs.existsSync(gitDir)) {
+          fs.rmSync(gitDir, { recursive: true, force: true });
+        }
+      }
+      await initializeShadowRepo();
+      console.log('Repository completely reinitialized');
+      return true;
+    } catch (lastResortError) {
+      console.error('Complete reinitialization failed:', lastResortError);
+      return false;
+    }
   }
 }
 
@@ -419,7 +699,14 @@ async function viewDiff(currentHash: string, previousHash: string) {
     }
   } catch (error) {
     console.error('Error viewing diff:', error);
-    vscode.window.showErrorMessage('Failed to view diff');
+    
+    // Try to repair Git state if there's an error
+    const repaired = await repairGitRepository();
+    if (repaired) {
+      vscode.window.showWarningMessage('Git repository was repaired. Please try viewing the diff again.');
+    } else {
+      vscode.window.showErrorMessage('Failed to view diff. The Git repository may be corrupted.');
+    }
   }
 }
 
@@ -428,8 +715,65 @@ async function viewDiff(currentHash: string, previousHash: string) {
  */
 async function viewFileDiff(filePath: string, currentHash: string, previousHash: string) {
   try {
+    console.log(`Viewing diff for ${filePath} between ${previousHash.substring(0, 8)} and ${currentHash.substring(0, 8)}`);
+    
+    // First check if the repository is valid
+    const isRepo = await git.checkIsRepo();
+    if (!isRepo) {
+      console.error('Git repository is not valid');
+      vscode.window.showErrorMessage('VibeTrail repository is not valid. Try running the "Repair Repository" command.');
+      return;
+    }
+
+    // Check if both commits exist
+    try {
+      await git.show(['--format=', currentHash]);
+      console.log(`Current commit ${currentHash.substring(0, 8)} exists`);
+    } catch (error) {
+      console.error(`Current commit ${currentHash} not found:`, error);
+      vscode.window.showErrorMessage(`Current snapshot ${currentHash.substring(0, 8)} not found. The repository may be corrupted.`);
+      return;
+    }
+
+    try {
+      await git.show(['--format=', previousHash]);
+      console.log(`Previous commit ${previousHash.substring(0, 8)} exists`);
+    } catch (error) {
+      console.error(`Previous commit ${previousHash} not found:`, error);
+      vscode.window.showErrorMessage(`Previous snapshot ${previousHash.substring(0, 8)} not found. The repository may be corrupted.`);
+      return;
+    }
+
+    // Check file existence in both commits (this is optional - files can be added/deleted)
+    let currentFileExists = false;
+    let previousFileExists = false;
+    
+    try {
+      await git.show(`${currentHash}:${filePath}`);
+      currentFileExists = true;
+      console.log(`File ${filePath} exists in current commit`);
+    } catch (error) {
+      console.log(`File ${filePath} not found in current commit ${currentHash} (might be deleted)`);
+    }
+    
+    try {
+      await git.show(`${previousHash}:${filePath}`);
+      previousFileExists = true;
+      console.log(`File ${filePath} exists in previous commit`);
+    } catch (error) {
+      console.log(`File ${filePath} not found in previous commit ${previousHash} (might be added)`);
+    }
+
+    // If file doesn't exist in either commit, that's an error
+    if (!currentFileExists && !previousFileExists) {
+      vscode.window.showErrorMessage(`File "${filePath}" not found in either snapshot. This might indicate a repository issue.`);
+      return;
+    }
+
     const currentUri = vscode.Uri.parse(`vibetrail://${currentHash}/${filePath}`);
     const previousUri = vscode.Uri.parse(`vibetrail://${previousHash}/${filePath}`);
+    
+    console.log(`Opening diff with URIs: ${previousUri.toString()} -> ${currentUri.toString()}`);
     
     const title = `${path.basename(filePath)} (${previousHash.substring(0, 8)} ↔ ${currentHash.substring(0, 8)})`;
     
@@ -439,9 +783,26 @@ async function viewFileDiff(filePath: string, currentHash: string, previousHash:
       currentUri,
       title
     );
+    
+    console.log('Diff command executed successfully');
   } catch (error) {
     console.error('Error viewing file diff:', error);
-    vscode.window.showErrorMessage(`Failed to view diff for ${filePath}`);
+    
+    // Try to repair Git state if there's an error
+    const shouldRepair = await vscode.window.showErrorMessage(
+      `Failed to view diff for ${filePath}: ${error instanceof Error ? error.message : 'Unknown error'}. Would you like to try repairing the repository?`,
+      'Repair Repository',
+      'Cancel'
+    );
+    
+    if (shouldRepair === 'Repair Repository') {
+      const repaired = await repairGitRepository();
+      if (repaired) {
+        vscode.window.showInformationMessage('Repository repaired. Please try viewing the diff again.');
+      } else {
+        vscode.window.showErrorMessage('Failed to repair repository. You may need to save a new snapshot.');
+      }
+    }
   }
 }
 
@@ -501,11 +862,29 @@ function getChangeSummary(commit: CommitInfo): string {
  */
 async function handleGenerateSummary(panel: vscode.WebviewPanel, currentHash: string, previousHash: string) {
   console.log('handleGenerateSummary called');
-  console.log('OpenAI client status:', !!openai);
+  console.log('Pro user status:', isProUser);
   
   try {
+    // Check if user has Pro license first
+    if (!isProUser) {
+      console.log('Non-Pro user attempting to use AI features');
+      const result = await vscode.window.showInformationMessage(
+        '🤖 AI Summaries are a VibeTrail Pro feature. Upgrade to unlock AI-powered change analysis!',
+        'Upgrade to Pro',
+        'Learn More',
+        'Maybe Later'
+      );
+      
+      if (result === 'Upgrade to Pro') {
+        vscode.env.openExternal(vscode.Uri.parse('https://vibetrail.dev/pro'));
+      } else if (result === 'Learn More') {
+        vscode.env.openExternal(vscode.Uri.parse('https://vibetrail.dev/features'));
+      }
+      return;
+    }
+    
     if (!openai) {
-      console.log('No OpenAI client, showing error dialog');
+      console.log('Pro user but no OpenAI client');
       const result = await vscode.window.showErrorMessage(
         'OpenAI API key not configured. Would you like to set it up now?', 
         'Open Settings', 
@@ -656,6 +1035,7 @@ async function restoreSnapshot(hash: string) {
     const workspacePath = workspaceFolder.uri.fsPath;
     const tempPath = path.join(os.tmpdir(), 'vibetrail-restore-' + Date.now());
     
+    try {
     // Create temp directory
     fs.mkdirSync(tempPath, { recursive: true });
     
@@ -667,36 +1047,300 @@ async function restoreSnapshot(hash: string) {
     const tempRepoGit = simpleGit(tempPath);
     await tempRepoGit.checkout(hash);
     
-    // Copy files from temp to workspace (excluding .git)
-    const files = fs.readdirSync(tempPath);
-    files.forEach(file => {
-      if (file !== '.git') {
-        const srcPath = path.join(tempPath, file);
-        const destPath = path.join(workspacePath, file);
-        
-        if (fs.statSync(srcPath).isDirectory()) {
-          fs.rmSync(destPath, { recursive: true, force: true });
-          fs.cpSync(srcPath, destPath, { recursive: true });
-        } else {
-          fs.copyFileSync(srcPath, destPath);
-        }
-      }
-    });
+      // Step 1: Clean the workspace (remove all files except ignored ones)
+      await cleanWorkspace(workspacePath);
+      
+      // Step 2: Copy all files from snapshot to workspace
+      await copySnapshotToWorkspace(tempPath, workspacePath);
+      
+      // Step 3: Synchronize shadow repository with restored workspace
+      await synchronizeShadowRepo(workspacePath, hash);
     
     // Clean up temp directory
     fs.rmSync(tempPath, { recursive: true });
     
     vscode.window.showInformationMessage('Snapshot restored successfully');
+    } catch (restoreError) {
+      console.error('Error during restore operation:', restoreError);
+      
+      // Clean up temp directory if it exists
+      if (fs.existsSync(tempPath)) {
+        fs.rmSync(tempPath, { recursive: true, force: true });
+      }
+      
+      // Try to recover Git state
+      try {
+        await git.reset(['--hard', 'HEAD']);
+        await git.clean('f', ['-d']);
+      } catch (recoveryError) {
+        console.error('Error recovering Git state:', recoveryError);
+      }
+      
+      throw restoreError;
+    }
   } catch (error) {
     console.error('Error restoring snapshot:', error);
-    vscode.window.showErrorMessage('Failed to restore snapshot');
+    vscode.window.showErrorMessage(`Failed to restore snapshot: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
+}
+
+/**
+ * Synchronize the shadow repository with the current workspace state
+ * This prevents deleted files from appearing in the next snapshot
+ */
+async function synchronizeShadowRepo(workspacePath: string, restoredCommitHash: string) {
+  try {
+    console.log('Synchronizing shadow repository with restored workspace...');
+    
+    // Step 1: Don't reset Git history - we want to maintain linear progression
+    // Instead, we'll update the working directory to match the restored workspace
+    
+    // Step 2: Clean the shadow repository working directory (except .git)
+    const shadowItems = fs.readdirSync(shadowRepoPath);
+    for (const item of shadowItems) {
+      if (item !== '.git') {
+        const itemPath = path.join(shadowRepoPath, item);
+        try {
+          if (fs.statSync(itemPath).isDirectory()) {
+            fs.rmSync(itemPath, { recursive: true, force: true });
+          } else {
+            fs.unlinkSync(itemPath);
+          }
+          console.log(`Removed from shadow repo: ${item}`);
+        } catch (error) {
+          console.warn(`Failed to remove ${item} from shadow repo:`, error);
+        }
+      }
+    }
+    
+    // Step 3: Copy workspace files to shadow repo (exact match)
+    await copyWorkspaceToShadowRepo(workspacePath, shadowRepoPath);
+    
+    // Step 4: Stage all changes (additions, modifications, deletions)
+    await git.add('.');
+    
+    // Step 5: Create a commit that represents the restore operation
+    const timestamp = new Date().toISOString();
+    const commitMessage = `Restored to snapshot ${restoredCommitHash.substring(0, 8)} | Snapshot @ ${timestamp}`;
+    
+    try {
+      await git.commit(commitMessage);
+      console.log('Created restore commit to maintain clean history');
+    } catch (commitError) {
+      // If there are no changes to commit, that's fine
+      if (commitError instanceof Error && commitError.message.includes('nothing to commit')) {
+        console.log('No changes to commit after restore - workspace already matches shadow repo');
+      } else {
+        throw commitError;
+      }
+    }
+    
+    console.log('Shadow repository synchronized successfully');
+  } catch (error) {
+    console.error('Error synchronizing shadow repository:', error);
+    // Don't throw here - restore was successful, this is just cleanup
+    console.warn('Shadow repository sync failed, but restore was successful');
+  }
+}
+
+/**
+ * Copy workspace files to shadow repository (with consistent ignore patterns)
+ */
+async function copyWorkspaceToShadowRepo(workspacePath: string, shadowRepoPath: string) {
+  const ignorePatterns = [
+    'node_modules',
+    '.git',
+    '.gitignore',
+    '.gitattributes',
+    '.gitmodules',
+    '.vscode',
+    'out',
+    'dist',
+    'build',
+    '.DS_Store',
+    'Thumbs.db',
+    'venv',
+    'env',
+    '.venv',
+    '.env'
+  ];
+  
+  const copyRecursive = (src: string, dest: string) => {
+    if (!fs.existsSync(src)) {
+      return;
+    }
+    
+    const stat = fs.statSync(src);
+    
+    if (stat.isDirectory()) {
+      const dirName = path.basename(src);
+      
+      // Skip ignored directories
+      if (ignorePatterns.includes(dirName)) {
+        return;
+      }
+      
+      // Create directory if it doesn't exist
+      if (!fs.existsSync(dest)) {
+        fs.mkdirSync(dest, { recursive: true });
+      }
+      
+      // Copy all items in directory
+      const items = fs.readdirSync(src);
+      items.forEach(item => {
+        const srcPath = path.join(src, item);
+        const destPath = path.join(dest, item);
+        copyRecursive(srcPath, destPath);
+      });
+    } else {
+      const fileName = path.basename(src);
+      
+      // Skip ignored files
+      if (ignorePatterns.some(pattern => fileName.includes(pattern))) {
+        return;
+      }
+      
+      // Copy file
+      const destDir = path.dirname(dest);
+      if (!fs.existsSync(destDir)) {
+        fs.mkdirSync(destDir, { recursive: true });
+      }
+      fs.copyFileSync(src, dest);
+    }
+  };
+  
+  console.log('Copying workspace files to shadow repository...');
+  
+  // Copy all files from workspace to shadow repo (with ignore patterns)
+  const items = fs.readdirSync(workspacePath);
+  items.forEach(item => {
+    if (item !== '.git') {
+      const srcPath = path.join(workspacePath, item);
+      const destPath = path.join(shadowRepoPath, item);
+      copyRecursive(srcPath, destPath);
+      console.log(`Copied to shadow repo: ${item}`);
+    }
+  });
+  
+  console.log('Workspace files copied to shadow repository successfully');
+}
+
+/**
+ * Clean the workspace by removing all files except ignored ones
+ */
+async function cleanWorkspace(workspacePath: string) {
+  const ignorePatterns = [
+    'node_modules',
+    '.git',
+    '.gitignore',
+    '.gitattributes',
+    '.gitmodules',
+    '.vscode',
+    'out',
+    'dist',
+    'build',
+    '.DS_Store',
+    'Thumbs.db',
+    'venv',
+    'env',
+    '.venv',
+    '.env'
+  ];
+  
+  const shouldIgnore = (itemName: string): boolean => {
+    return ignorePatterns.some(pattern => itemName.includes(pattern));
+  };
+  
+  const cleanDirectory = (dirPath: string) => {
+    if (!fs.existsSync(dirPath)) {
+      return;
+    }
+    
+    const items = fs.readdirSync(dirPath);
+    
+    for (const item of items) {
+      const itemPath = path.join(dirPath, item);
+      
+      // Skip ignored items
+      if (shouldIgnore(item)) {
+        console.log(`Skipping ignored item during clean: ${item}`);
+        continue;
+      }
+      
+      try {
+        const stat = fs.statSync(itemPath);
+        
+        if (stat.isDirectory()) {
+          // Recursively remove directory
+          fs.rmSync(itemPath, { recursive: true, force: true });
+          console.log(`Removed directory: ${item}`);
+        } else {
+          // Remove file
+          fs.unlinkSync(itemPath);
+          console.log(`Removed file: ${item}`);
+        }
+      } catch (error) {
+        console.warn(`Failed to remove ${item}:`, error);
+        // Continue with other items even if one fails
+      }
+    }
+  };
+  
+  console.log('Cleaning workspace before restore...');
+  cleanDirectory(workspacePath);
+  console.log('Workspace cleaned successfully');
+}
+
+/**
+ * Copy files from snapshot to workspace
+ */
+async function copySnapshotToWorkspace(snapshotPath: string, workspacePath: string) {
+  const copyRecursive = (src: string, dest: string) => {
+    const stat = fs.statSync(src);
+    
+    if (stat.isDirectory()) {
+      // Create directory if it doesn't exist
+      if (!fs.existsSync(dest)) {
+        fs.mkdirSync(dest, { recursive: true });
+      }
+      
+      // Copy all items in directory
+      const items = fs.readdirSync(src);
+      items.forEach(item => {
+        const srcPath = path.join(src, item);
+        const destPath = path.join(dest, item);
+        copyRecursive(srcPath, destPath);
+      });
+    } else {
+      // Copy file
+      const destDir = path.dirname(dest);
+      if (!fs.existsSync(destDir)) {
+        fs.mkdirSync(destDir, { recursive: true });
+      }
+      fs.copyFileSync(src, dest);
+    }
+  };
+  
+  console.log('Copying snapshot files to workspace...');
+  
+  // Copy all files from snapshot (excluding .git)
+  const items = fs.readdirSync(snapshotPath);
+  items.forEach(item => {
+    if (item !== '.git') {
+      const srcPath = path.join(snapshotPath, item);
+      const destPath = path.join(workspacePath, item);
+      copyRecursive(srcPath, destPath);
+      console.log(`Copied: ${item}`);
+    }
+  });
+  
+  console.log('Snapshot files copied successfully');
 }
 
 /**
  * Generate HTML content for the webview
  */
-function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): string {
+function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false, isProUser: boolean): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -924,6 +1568,25 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
         .ai-btn-disabled:hover {
             background: #374151 !important;
         }
+        .ai-btn-pro-required {
+            background: linear-gradient(135deg, #f59e0b, #d97706) !important;
+            color: white !important;
+            cursor: pointer !important;
+            opacity: 1 !important;
+            position: relative;
+        }
+        .ai-btn-pro-required:hover {
+            background: linear-gradient(135deg, #d97706, #b45309) !important;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(245, 158, 11, 0.3);
+        }
+        .ai-btn-pro-required::after {
+            content: "✨";
+            position: absolute;
+            top: -2px;
+            right: -2px;
+            font-size: 0.7em;
+        }
         .ai-loading {
             color: var(--vscode-descriptionForeground);
             font-style: italic;
@@ -985,10 +1648,24 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
 <body>
     <h1>VibeTrail Timeline</h1>
     
-    ${!hasApiKey ? `
+    ${!isProUser ? `
         <div class="api-key-help">
-            <h3>🤖 Unlock AI-Powered Change Analysis</h3>
-            <p>VibeTrail can generate smart summaries and risk analysis of your code changes using AI. To enable this feature, you'll need to provide your own OpenAI API key.</p>
+            <h3>✨ Upgrade to VibeTrail Pro</h3>
+            <p>Unlock AI-powered change analysis! Get smart summaries and risk analysis of your code changes with VibeTrail Pro.</p>
+            <div style="background: #1e40af; border: 1px solid #3b82f6; border-radius: 4px; padding: 8px; margin: 8px 0; font-size: 0.85em; color: white;">
+                <strong>🚀 Pro Features:</strong> AI summaries, risk analysis, and more coming soon!
+            </div>
+            <button class="setup-btn" onclick="vscode.postMessage({command: 'openExternal', url: 'https://vibetrail.dev/pro'})">
+                Upgrade to Pro
+            </button>
+            <button class="learn-more-btn" onclick="vscode.postMessage({command: 'openExternal', url: 'https://vibetrail.dev/features'})">
+                Learn More
+            </button>
+        </div>
+    ` : (!hasApiKey ? `
+        <div class="api-key-help">
+            <h3>🤖 Configure AI Features</h3>
+            <p>You have VibeTrail Pro! Set up your OpenAI API key to unlock AI-powered change analysis.</p>
             <div style="background: var(--vscode-inputValidation-warningBackground); border: 1px solid var(--vscode-inputValidation-warningBorder); border-radius: 4px; padding: 8px; margin: 8px 0; font-size: 0.85em; color: #333333;">
                 <strong>⚠️ Important:</strong> Due to VS Code settings behavior, you need to set your API key in <em>both</em> User settings AND Workspace settings for it to work properly.
             </div>
@@ -999,7 +1676,7 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
                 Get API Key
             </a>
         </div>
-    ` : ''}
+    ` : '')}
     
     ${commits.length === 0 ? `
         <div class="empty-state">
@@ -1080,11 +1757,19 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
                                 🔄 Restore
                             </button>
                             ${index < commits.length - 1 ? `
+                                ${isProUser ? `
                                 <button class="ai-btn ${!hasApiKey ? 'ai-btn-disabled' : ''}" 
                                         onclick="${hasApiKey ? `generateSummary('${commit.hash}', '${commits[index + 1].hash}')` : 'showApiKeyHelp()'}"
                                         ${!hasApiKey ? 'title="API key required - click to configure"' : ''}>
-                                    🤖 ${hasApiKey ? 'AI Summary' : 'AI Summary (API Key Required)'}
+                                        🤖 ${hasApiKey ? 'AI Summary' : 'AI Summary (API Key Required)'}
                                 </button>
+                                ` : `
+                                    <button class="ai-btn ai-btn-pro-required" 
+                                            onclick="showProUpgrade()"
+                                            title="Upgrade to VibeTrail Pro to unlock AI-powered change analysis">
+                                        🤖 AI Summary (Pro)
+                                    </button>
+                                `}
                             ` : ''}
                         </div>
                         
@@ -1165,6 +1850,12 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false): s
                 openSettings();
             }
         }
+
+        function showProUpgrade() {
+            if (confirm('🤖 AI Summaries are a VibeTrail Pro feature. Upgrade to unlock AI-powered change analysis! Would you like to upgrade now?')) {
+                vscode.env.openExternal(vscode.Uri.parse('https://vibetrail.dev/pro'));
+            }
+        }
         
         function openSettings() {
             vscode.postMessage({
@@ -1235,15 +1926,48 @@ class GitSnapshotFileSystemProvider implements vscode.FileSystemProvider {
     const [commitHash, filePath] = this.parseUri(uri);
     
     try {
+      // First check if the repository is valid
+      const isRepo = await this.git.checkIsRepo();
+      if (!isRepo) {
+        console.error('Git repository is not valid');
+        throw vscode.FileSystemError.Unavailable('Git repository is not available');
+      }
+
+      // Check if commit exists
+      try {
+        await this.git.show(['--format=', commitHash]);
+      } catch (commitError) {
+        console.error(`Commit ${commitHash} not found:`, commitError);
+        throw vscode.FileSystemError.FileNotFound(uri);
+      }
+
       // Check if file exists in the commit
-      await this.git.show(`${commitHash}:${filePath}`);
+      const content = await this.git.show(`${commitHash}:${filePath}`);
+      
       return {
         type: vscode.FileType.File,
         ctime: 0,
         mtime: 0,
-        size: 0
+        size: Buffer.byteLength(content, 'utf8')
       };
-    } catch {
+    } catch (error) {
+      console.error(`File not found in commit ${commitHash}: ${filePath}`, error);
+      
+      // If this is a specific Git error about the file not existing, that's expected for added/deleted files
+      if (error instanceof Error && (
+        error.message.includes('does not exist') || 
+        error.message.includes('exists on disk, but not in') ||
+        error.message.includes('Path') && error.message.includes('does not exist')
+      )) {
+        // For deleted files, we still want to show them as existing with empty content
+        return {
+          type: vscode.FileType.File,
+          ctime: 0,
+          mtime: 0,
+          size: 0
+        };
+      }
+      
       throw vscode.FileSystemError.FileNotFound(uri);
     }
   }
@@ -1252,9 +1976,36 @@ class GitSnapshotFileSystemProvider implements vscode.FileSystemProvider {
     const [commitHash, filePath] = this.parseUri(uri);
     
     try {
+      // First check if the repository is valid
+      const isRepo = await this.git.checkIsRepo();
+      if (!isRepo) {
+        console.error('Git repository is not valid');
+        throw vscode.FileSystemError.Unavailable('Git repository is not available');
+      }
+
+      // Check if commit exists
+      try {
+        await this.git.show(['--format=', commitHash]);
+      } catch (commitError) {
+        console.error(`Commit ${commitHash} not found:`, commitError);
+        throw vscode.FileSystemError.FileNotFound(uri);
+      }
+
       const content = await this.git.show(`${commitHash}:${filePath}`);
       return Buffer.from(content, 'utf8');
     } catch (error) {
+      console.error(`Failed to read file ${filePath} from commit ${commitHash}:`, error);
+      
+      // If this is a specific Git error about the file not existing, return empty content
+      if (error instanceof Error && (
+        error.message.includes('does not exist') || 
+        error.message.includes('exists on disk, but not in') ||
+        error.message.includes('Path') && error.message.includes('does not exist')
+      )) {
+        // Return empty content for deleted files
+        return Buffer.from('', 'utf8');
+      }
+      
       throw vscode.FileSystemError.FileNotFound(uri);
     }
   }
@@ -1263,6 +2014,13 @@ class GitSnapshotFileSystemProvider implements vscode.FileSystemProvider {
     // URI format: vibetrail://commit-hash/file/path
     const commitHash = uri.authority;
     const filePath = uri.path.substring(1); // Remove leading slash
+    
+    console.log(`Parsing URI: ${uri.toString()} -> commit: ${commitHash}, file: ${filePath}`);
+    
+    if (!commitHash || !filePath) {
+      throw new Error(`Invalid URI format: ${uri.toString()}`);
+    }
+    
     return [commitHash, filePath];
   }
 

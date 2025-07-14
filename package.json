@@ -30,15 +30,26 @@
         "command": "vibetrail.showTimeline",
         "title": "Show Timeline",
         "category": "VibeTrail"
+      },
+      {
+        "command": "vibetrail.repairRepository",
+        "title": "Repair Repository",
+        "category": "VibeTrail"
       }
     ],
     "configuration": {
       "title": "VibeTrail",
       "properties": {
+        "vibetrail.proLicenseKey": {
+          "type": "string",
+          "default": "",
+          "description": "VibeTrail Pro license key for AI-powered features",
+          "markdownDescription": "Your VibeTrail Pro license key. Get one at [VibeTrail Pro](https://vibetrail.dev/pro)"
+        },
         "vibetrail.openaiApiKey": {
           "type": "string",
           "default": "",
-          "description": "OpenAI API key for AI-powered features (change summaries and risk analysis)",
+          "description": "OpenAI API key for AI-powered features (Pro users only)",
           "markdownDescription": "Your OpenAI API key. Get one at [OpenAI Platform](https://platform.openai.com/api-keys)"
         }
       }
