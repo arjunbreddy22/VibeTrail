@@ -92,13 +92,27 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 /**
- * Initialize the shadow Git repository at ~/.vibetrail/
+ * Initialize the shadow Git repository for the current workspace
  */
 async function initializeShadowRepo() {
   try {
-    // Create shadow repo path in user's home directory
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      throw new Error('No workspace folder open');
+    }
+    
+    // Create a unique identifier for this workspace
+    const workspacePath = workspaceFolder.uri.fsPath;
+    const workspaceName = path.basename(workspacePath);
+    
+    // Create a safe directory name from the workspace path
+    const workspaceHash = Buffer.from(workspacePath).toString('base64')
+      .replace(/[/+=]/g, '_')
+      .substring(0, 16);
+    
+    // Create shadow repo path specific to this workspace
     const homeDir = os.homedir();
-    shadowRepoPath = path.join(homeDir, '.vibetrail');
+    shadowRepoPath = path.join(homeDir, '.vibetrail', `${workspaceName}_${workspaceHash}`);
     
     // Create directory if it doesn't exist
     if (!fs.existsSync(shadowRepoPath)) {
@@ -112,9 +126,9 @@ async function initializeShadowRepo() {
     const isRepo = await git.checkIsRepo();
     if (!isRepo) {
       await git.init();
-      console.log('Shadow Git repository initialized at:', shadowRepoPath);
+      console.log('Shadow Git repository initialized for workspace:', workspaceName, 'at:', shadowRepoPath);
     } else {
-      console.log('Shadow Git repository already exists at:', shadowRepoPath);
+      console.log('Shadow Git repository already exists for workspace:', workspaceName, 'at:', shadowRepoPath);
       
       // Validate repository integrity
       const isHealthy = await validateRepositoryHealth();
@@ -245,13 +259,7 @@ async function saveSnapshot(prompt?: string) {
       prompt = await vscode.window.showInputBox({
         title: 'Save Snapshot',
         prompt: 'What are you working on? (optional)',
-        placeHolder: 'e.g., "Before asking AI to refactor login" or leave empty',
-        validateInput: (value) => {
-          if (value.length > 200) {
-            return 'Prompt must be 200 characters or less';
-          }
-          return null;
-        }
+        placeHolder: 'Enter your AI prompt or describe what you\'re doing, or leave empty'
       });
       
       // If user cancelled the input box, don't save
@@ -1411,10 +1419,41 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false, is
             padding: 40px;
             color: var(--vscode-descriptionForeground);
         }
-                        .commit-prompt {
+                        .prompt-container {
+            margin-bottom: 12px;
+        }
+        .commit-prompt {
             font-style: italic;
             color: var(--vscode-textLink-foreground);
-            margin-bottom: 5px;
+            margin-bottom: 6px;
+            line-height: 1.4;
+            padding: 8px 12px;
+            background: var(--vscode-editor-inactiveSelectionBackground);
+            border-radius: 6px;
+            border-left: 3px solid var(--vscode-textLink-foreground);
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .commit-prompt.collapsed {
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        .expand-prompt-btn {
+            background: none;
+            border: none;
+            color: var(--vscode-textLink-foreground);
+            cursor: pointer;
+            font-size: 0.8em;
+            padding: 4px 8px;
+            margin-top: 4px;
+            border-radius: 4px;
+            transition: background-color 0.2s;
+        }
+        .expand-prompt-btn:hover {
+            background: var(--vscode-list-hoverBackground);
+            text-decoration: underline;
         }
         .commit-stats {
             display: flex;
@@ -1688,9 +1727,14 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false, is
                 <div class="commit">
                     <div class="commit-header">
                         <div class="commit-info">
-                            <div style="display: flex; align-items: center; flex-wrap: wrap; margin-bottom: 8px;">
-                                ${commit.prompt ? `<div class="commit-prompt">"${commit.prompt}"</div>` : ''}
-                            </div>
+                            ${commit.prompt ? `
+<div class="prompt-container">
+<div class="commit-prompt ${commit.prompt.length > 150 ? 'collapsed' : ''}" id="prompt-${commit.hash}">"${commit.prompt}"</div>
+${commit.prompt.length > 150 ? `
+<button class="expand-prompt-btn" id="expand-${commit.hash}" onclick="togglePrompt('${commit.hash}')">Show More</button>
+` : ''}
+</div>
+                            ` : ''}
                             
                             <div class="commit-message">${commit.prompt ? 'Snapshot' : commit.message}</div>
                             
@@ -1834,6 +1878,19 @@ function getWebviewContent(commits: CommitInfo[], hasApiKey: boolean = false, is
                 filesDiv.classList.add('collapsed');
                 toggleButton.textContent = 'Show Files';
                 if (helpText) helpText.style.display = 'none';
+            }
+        }
+        
+        function togglePrompt(commitHash) {
+            const promptDiv = document.getElementById('prompt-' + commitHash);
+            const expandButton = document.getElementById('expand-' + commitHash);
+            
+            if (promptDiv.classList.contains('collapsed')) {
+                promptDiv.classList.remove('collapsed');
+                expandButton.textContent = 'Show Less';
+            } else {
+                promptDiv.classList.add('collapsed');
+                expandButton.textContent = 'Show More';
             }
         }
         
