@@ -40,16 +40,10 @@
     "configuration": {
       "title": "VibeTrail",
       "properties": {
-        "vibetrail.proLicenseKey": {
-          "type": "string",
-          "default": "",
-          "description": "VibeTrail Pro license key for AI-powered features",
-          "markdownDescription": "Your VibeTrail Pro license key. Get one at [VibeTrail Pro](https://vibetrail.dev/pro)"
-        },
         "vibetrail.openaiApiKey": {
           "type": "string",
           "default": "",
-          "description": "OpenAI API key for AI-powered features (Pro users only)",
+          "description": "OpenAI API key for AI-powered features",
           "markdownDescription": "Your OpenAI API key. Get one at [OpenAI Platform](https://platform.openai.com/api-keys)"
         }
       }
