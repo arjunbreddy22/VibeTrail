@@ -19,7 +19,7 @@
     "onCommand:vibetrail.showTimeline"
   ],
   "main": "./out/extension.js",
-  "icon": "VibeTrail Logo.png",
+  "icon": "vibetrail-logo.png",
   "contributes": {
     "commands": [
       {
