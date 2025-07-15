@@ -62,10 +62,6 @@ If you encounter issues with the timeline or snapshots:
 - **Check Console**: Open the VS Code Developer Console to see detailed logs.
 - **Per-Project Isolation**: Each workspace has its own timeline, so issues in one project won't affect others.
 
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to open an issue or submit a pull request.
-
 ## 📄 License
 
 This project is proprietary and closed-source. All rights are reserved. For licensing information, please see the LICENSE file.

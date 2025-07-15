@@ -1,8 +1,8 @@
 {
   "name": "vibetrail",
   "displayName": "VibeTrail",
-  "description": "Track your coding journey with automatic workspace snapshots",
-  "version": "0.0.1",
+  "description": "Effortlessly track your Vibe Coding journey with snapshots, restore points, and AI-powered change analysis—all without cluttering your main Git history. Works on your IDE of choice (Cursor, Windsurf, VSCode, Codeium)",
+  "version": "0.1.1",
   "publisher": "ArjunReddy22",
   "repository": {
     "type": "git",
@@ -19,6 +19,7 @@
     "onCommand:vibetrail.showTimeline"
   ],
   "main": "./out/extension.js",
+  "icon": "VibeTrail Logo.png",
   "contributes": {
     "commands": [
       {
