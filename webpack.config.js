@@ -2,14 +2,13 @@ const path = require('path');
 
 module.exports = {
   target: 'node',
+  mode: 'none',
   entry: './src/extension.ts',
   output: {
     path: path.resolve(__dirname, 'out'),
     filename: 'extension.js',
-    libraryTarget: 'commonjs2',
-    devtoolModuleFilenameTemplate: '../[resource-path]'
+    libraryTarget: 'commonjs2'
   },
-  devtool: 'source-map',
   externals: {
     vscode: 'commonjs vscode'
   },
@@ -29,8 +28,8 @@ module.exports = {
       }
     ]
   },
-  mode: 'production',
-  optimization: {
-    minimize: false
+  devtool: 'nosources-source-map',
+  infrastructureLogging: {
+    level: "log"
   }
 }; 

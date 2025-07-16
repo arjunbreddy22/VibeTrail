@@ -2,7 +2,7 @@
   "name": "vibetrail",
   "displayName": "VibeTrail: Versional Control For Vibe Coding",
   "description": "Effortlessly track your Vibe Coding journey with snapshots, restore points, and AI-powered change analysis—all without cluttering your main Git history. Works on your IDE of choice (Cursor, Windsurf, VSCode, Codeium)",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "publisher": "ArjunReddy22",
   "repository": {
     "type": "git",
@@ -15,7 +15,8 @@
     "Other"
   ],
   "activationEvents": [
-    "*"
+    "onCommand:vibetrail.saveSnapshot",
+    "onCommand:vibetrail.showTimeline"
   ],
   "main": "./out/extension.js",
   "icon": "vibetrail-logo.png",
@@ -50,11 +51,12 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run webpack",
-    "webpack": "webpack --mode production",
-    "webpack-dev": "webpack --mode development",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "compile-tests": "tsc -p . --outDir out --noEmit false",
+    "watch-tests": "tsc -p . -w --outDir out --noEmit false"
   },
   "devDependencies": {
     "@types/vscode": "^1.74.0",
