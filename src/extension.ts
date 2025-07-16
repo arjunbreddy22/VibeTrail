@@ -2,8 +2,10 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { simpleGit, SimpleGit } from 'simple-git';
-import OpenAI from 'openai';
+
+// Type imports for development
+type SimpleGit = any;
+type OpenAI = any;
 
 // Interface for commit metadata
 interface CommitInfo {
@@ -33,62 +35,114 @@ let git: SimpleGit;
 let openai: OpenAI | null = null;
 let activeTimelinePanel: vscode.WebviewPanel | null = null;
 let isProUser: boolean = false;
+let isInitialized: boolean = false;
+
+// Lazy loading function for dependencies
+async function ensureInitialized(): Promise<void> {
+  if (isInitialized) {
+    return;
+  }
+
+  try {
+    console.log('VibeTrail: Initializing dependencies...');
+    
+    // Initialize shadow Git repo
+    await initializeShadowRepo();
+    
+    // Initialize OpenAI
+    await initializeOpenAI();
+    
+    isInitialized = true;
+    console.log('VibeTrail: Dependencies initialized successfully');
+  } catch (error) {
+    console.error('VibeTrail: Failed to initialize dependencies:', error);
+    throw error;
+  }
+}
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('VibeTrail extension is now active!');
   
-  // Initialize shadow Git repo on activation
-  initializeShadowRepo().then(() => {
-    // Register virtual file system provider only after Git is initialized
-    const fileSystemProvider = new GitSnapshotFileSystemProvider(git);
-    const fileSystemDisposable = vscode.workspace.registerFileSystemProvider('vibetrail', fileSystemProvider);
-    context.subscriptions.push(fileSystemDisposable);
-    console.log('Virtual file system provider registered successfully');
-  }).catch(error => {
-    console.error('Failed to initialize VibeTrail:', error);
-    vscode.window.showErrorMessage('Failed to initialize VibeTrail. Some features may not work properly.');
+  // Register commands immediately without heavy initialization
+  const saveSnapshotCommand = vscode.commands.registerCommand('vibetrail.saveSnapshot', async () => {
+    try {
+      await ensureInitialized();
+      await saveSnapshot();
+    } catch (error) {
+      console.error('Error in saveSnapshot command:', error);
+      vscode.window.showErrorMessage('Failed to initialize VibeTrail. Some features may not work properly.');
+    }
   });
   
-  // Initialize OpenAI
-  initializeOpenAI();
+  const showTimelineCommand = vscode.commands.registerCommand('vibetrail.showTimeline', async () => {
+    try {
+      await ensureInitialized();
+      await showTimeline();
+    } catch (error) {
+      console.error('Error in showTimeline command:', error);
+      vscode.window.showErrorMessage('Failed to initialize VibeTrail. Some features may not work properly.');
+    }
+  });
+  
+  const repairRepoCommand = vscode.commands.registerCommand('vibetrail.repairRepository', async () => {
+    try {
+      const result = await vscode.window.showWarningMessage(
+        'This will attempt to repair the VibeTrail repository by resetting its state. Continue?',
+        'Yes',
+        'No'
+      );
+      
+      if (result === 'Yes') {
+        await ensureInitialized();
+        const repaired = await repairGitRepository();
+        if (repaired) {
+          vscode.window.showInformationMessage('VibeTrail repository repaired successfully');
+        } else {
+          vscode.window.showErrorMessage('Failed to repair VibeTrail repository');
+        }
+      }
+    } catch (error) {
+      console.error('Error in repairRepository command:', error);
+      vscode.window.showErrorMessage('Failed to repair repository.');
+    }
+  });
   
   // Listen for configuration changes
   const configChangeListener = vscode.workspace.onDidChangeConfiguration(async event => {
     if (event.affectsConfiguration('vibetrail.openaiApiKey') || event.affectsConfiguration('vibetrail.proLicenseKey')) {
       console.log('VibeTrail configuration changed, reinitializing...');
-      initializeOpenAI();
       
-      // Refresh the timeline if it's open
-      if (activeTimelinePanel) {
-        const commits = await getCommitHistory();
-        const hasApiKey = !!openai;
-        activeTimelinePanel.webview.html = getWebviewContent(commits, hasApiKey, isProUser);
-        console.log('Timeline refreshed with new Pro status:', isProUser, 'API key status:', hasApiKey);
-      }
-    }
-  });
-  
-  // Register commands
-  const saveSnapshotCommand = vscode.commands.registerCommand('vibetrail.saveSnapshot', () => saveSnapshot());
-  const showTimelineCommand = vscode.commands.registerCommand('vibetrail.showTimeline', showTimeline);
-  const repairRepoCommand = vscode.commands.registerCommand('vibetrail.repairRepository', async () => {
-    const result = await vscode.window.showWarningMessage(
-      'This will attempt to repair the VibeTrail repository by resetting its state. Continue?',
-      'Yes',
-      'No'
-    );
-    
-    if (result === 'Yes') {
-      const repaired = await repairGitRepository();
-      if (repaired) {
-        vscode.window.showInformationMessage('VibeTrail repository repaired successfully');
-      } else {
-        vscode.window.showErrorMessage('Failed to repair VibeTrail repository');
+      // Only reinitialize if we're already initialized
+      if (isInitialized) {
+        await initializeOpenAI();
+        
+        // Refresh the timeline if it's open
+        if (activeTimelinePanel) {
+          const commits = await getCommitHistory();
+          const hasApiKey = !!openai;
+          activeTimelinePanel.webview.html = getWebviewContent(commits, hasApiKey, isProUser);
+          console.log('Timeline refreshed with new Pro status:', isProUser, 'API key status:', hasApiKey);
+        }
       }
     }
   });
   
   context.subscriptions.push(saveSnapshotCommand, showTimelineCommand, repairRepoCommand, configChangeListener);
+  
+  // Deferred initialization: Initialize virtual file system provider when first needed
+  let fileSystemProviderRegistered = false;
+  const ensureFileSystemProvider = async () => {
+    if (!fileSystemProviderRegistered && isInitialized) {
+      const fileSystemProvider = new GitSnapshotFileSystemProvider(git);
+      const fileSystemDisposable = vscode.workspace.registerFileSystemProvider('vibetrail', fileSystemProvider);
+      context.subscriptions.push(fileSystemDisposable);
+      fileSystemProviderRegistered = true;
+      console.log('Virtual file system provider registered successfully');
+    }
+  };
+  
+  // Register the provider when we first need to view diffs
+  context.subscriptions.push(vscode.commands.registerCommand('vibetrail.ensureFileSystemProvider', ensureFileSystemProvider));
 }
 
 /**
@@ -96,6 +150,9 @@ export function activate(context: vscode.ExtensionContext) {
  */
 async function initializeShadowRepo() {
   try {
+    // Lazy load simple-git
+    const { simpleGit } = await import('simple-git');
+    
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (!workspaceFolder) {
       throw new Error('No workspace folder open');
@@ -198,7 +255,7 @@ function checkProLicense(): boolean {
 /**
  * Initialize OpenAI client (only for Pro users)
  */
-function initializeOpenAI() {
+async function initializeOpenAI() {
   try {
     // Check Pro license first
     isProUser = checkProLicense();
@@ -215,6 +272,8 @@ function initializeOpenAI() {
     console.log('Initializing OpenAI for Pro user with API key present:', !!apiKey);
     
     if (apiKey && apiKey.trim()) {
+      // Lazy load OpenAI
+      const { default: OpenAI } = await import('openai');
       openai = new OpenAI({
         apiKey: apiKey.trim()
       });
@@ -343,6 +402,7 @@ async function copyWorkspaceFiles(source: string, destination: string) {
   
   // Verify Git repository is accessible before proceeding
   try {
+    const { simpleGit } = await import('simple-git');
     const tempGit = simpleGit(destination);
     await tempGit.status();
   } catch (error) {
@@ -416,6 +476,7 @@ async function copyWorkspaceFiles(source: string, destination: string) {
  */
 async function showTimeline() {
   try {
+    await ensureInitialized(); // Ensure dependencies are loaded
     const commits = await getCommitHistory();
     const hasApiKey = !!openai;
     
@@ -517,11 +578,11 @@ async function getCommitHistory(): Promise<CommitInfo[]> {
             linesAdded = diffSummary.insertions || 0;
             linesRemoved = diffSummary.deletions || 0;
           
-          // Get file details
-          fileDetails = diffSummary.files.map(file => {
-            // Handle different file types - binary files don't have insertions/deletions
-            const insertions = 'insertions' in file ? file.insertions : 0;
-            const deletions = 'deletions' in file ? file.deletions : 0;
+            // Get file details
+  fileDetails = diffSummary.files.map((file: any) => {
+    // Handle different file types - binary files don't have insertions/deletions
+    const insertions = 'insertions' in file ? file.insertions : 0;
+    const deletions = 'deletions' in file ? file.deletions : 0;
             
             return {
               filename: file.file,
@@ -691,7 +752,7 @@ async function viewDiff(currentHash: string, previousHash: string) {
     }
     
     // If multiple files changed, show a picker
-    const fileItems = changedFiles.map(file => ({
+    const fileItems = changedFiles.map((file: any) => ({
       label: file.file,
       description: getFileChangeDescription(file),
       detail: `${('insertions' in file ? file.insertions : 0) || 0} additions, ${('deletions' in file ? file.deletions : 0) || 0} deletions`
@@ -703,7 +764,7 @@ async function viewDiff(currentHash: string, previousHash: string) {
     });
     
     if (selectedFile) {
-      await viewFileDiff(selectedFile.label, currentHash, previousHash);
+      await viewFileDiff((selectedFile as any).label, currentHash, previousHash);
     }
   } catch (error) {
     console.error('Error viewing diff:', error);
@@ -723,6 +784,8 @@ async function viewDiff(currentHash: string, previousHash: string) {
  */
 async function viewFileDiff(filePath: string, currentHash: string, previousHash: string) {
   try {
+    // Ensure file system provider is registered for diff viewing
+    await vscode.commands.executeCommand('vibetrail.ensureFileSystemProvider');
     console.log(`Viewing diff for ${filePath} between ${previousHash.substring(0, 8)} and ${currentHash.substring(0, 8)}`);
     
     // First check if the repository is valid
@@ -1048,6 +1111,7 @@ async function restoreSnapshot(hash: string) {
     fs.mkdirSync(tempPath, { recursive: true });
     
     // Clone shadow repo to temp directory
+    const { simpleGit } = await import('simple-git');
     const tempGit = simpleGit();
     await tempGit.clone(shadowRepoPath, tempPath);
     

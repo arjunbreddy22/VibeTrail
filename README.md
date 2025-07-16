@@ -1,4 +1,4 @@
-# VibeTrail: Your Personal Coding Journey Tracker
+# VibeTrail: Version Control for Vibe Coding
 
 ![Version](https://img.shields.io/badge/version-0.0.1-blue)
 
