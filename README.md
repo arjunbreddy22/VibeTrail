@@ -64,4 +64,4 @@ If you encounter issues with the timeline or snapshots:
 
 ## 📄 License
 
-This project is proprietary and closed-source. All rights are reserved. For licensing information, please see the LICENSE file.
+This project is open-source.
